@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)"
+    ]
+  },
+  "hooks": {
+    "PreCompact": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "python .claude/hooks/pre-compact-save.py"}]}
+    ],
+    "Notification": [
+      {"matcher": "", "hooks": [
+        {"type": "command", "command": "python .claude/hooks/auto-save-reminder.py"},
+        {"type": "command", "command": "python .claude/hooks/session-end-summary.py"}
+      ]}
+    ],
+    "PostToolUse": [
+      {"matcher": "mcp__memory__memcp_remember", "hooks": [
+        {"type": "command", "command": "python .claude/hooks/reset-counter.py"},
+        {"type": "command", "command": "python .claude/hooks/track-summary.py"}
+      ]},
+      {"matcher": "mcp__memory__memcp_load_context", "hooks": [
+        {"type": "command", "command": "python .claude/hooks/reset-counter.py"}
+      ]},
+      {"matcher": "mcp__memory__memcp_recall", "hooks": [
+        {"type": "command", "command": "python .claude/hooks/post-recall-reinforce.py"}
+      ]}
+    ]
+  }
+}
