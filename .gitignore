@@ -33,3 +33,6 @@ Thumbs.db
 *.swp
 *.swo
 .env.vor-signaltest.bak
+
+# TypeScript-Buildstand
+*.tsbuildinfo
