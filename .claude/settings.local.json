@@ -1,30 +1,108 @@
 {
   "permissions": {
     "allow": [
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(npx vitest:*)",
+      "Bash(docker compose:*)",
+      "Bash(npm test:*)",
+      "Bash(netstat:*)",
+      "Bash(tasklist:*)",
+      "Bash(tasklist.exe:*)",
+      "Bash(docker stop:*)",
+      "Bash(WEB_PORT=3300 npm run dev)",
+      "Read(//c/Users/thors/AppData/Local/Temp/claude/c--Development-opencode-TradingControl-Bot/c8aff5ac-d032-4e60-85ed-4a3523722133/tasks/**)",
+      "Bash(npx tsx -e \":*)",
+      "Bash(npx tsx:*)",
+      "Bash(taskkill //F //IM \"tsx.exe\")",
+      "Bash(taskkill //F //IM \"node.exe\")",
+      "Read(//c/Development/opencode/TradingControl/TradingControl/backend/**)",
+      "Read(//c/Development/opencode/TradingControl/TradingControl/**)",
+      "Bash(find c:/Development/opencode/TradingControl-Bot/packages/docker-bot/src/ui -type f -name *.ts -o -name *.tsx -o -name *.css -o -name *.json)",
+      "Bash(find c:DevelopmentopencodeTradingControlTradingControlfrontendsrc -type f -name *.tsx)",
+      "Bash(xargs grep:*)",
+      "Bash(find c:DevelopmentopencodeTradingControlTradingControlfrontendsrcservices -type f -name *.ts)",
+      "Bash(find c:DevelopmentopencodeTradingControlTradingControlbackendsrc -type f -name *trade*plan*.ts)",
+      "Bash(find c:DevelopmentopencodeTradingControl-Botpackages -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\))",
+      "Bash(python3 -m json.tool)",
+      "WebSearch",
+      "WebFetch(domain:www.capitalstreetfx.com)",
+      "WebFetch(domain:www.quantvps.com)",
+      "WebFetch(domain:blog.bitunix.com)",
+      "WebFetch(domain:medium.com)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\(''''volatility'''',{}\\), indent=2\\)\\)\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Development\\opencode\\TradingControl\\TradingControl\\backend\\src\\modules\\bot"
     ]
   },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "memory"
+  ],
   "hooks": {
     "PreCompact": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "python .claude/hooks/pre-compact-save.py"}]}
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/pre-compact-save.py"
+          }
+        ]
+      }
     ],
     "Notification": [
-      {"matcher": "", "hooks": [
-        {"type": "command", "command": "python .claude/hooks/auto-save-reminder.py"},
-        {"type": "command", "command": "python .claude/hooks/session-end-summary.py"}
-      ]}
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/auto-save-reminder.py"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/session-end-summary.py"
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      {"matcher": "mcp__memory__memcp_remember", "hooks": [
-        {"type": "command", "command": "python .claude/hooks/reset-counter.py"},
-        {"type": "command", "command": "python .claude/hooks/track-summary.py"}
-      ]},
-      {"matcher": "mcp__memory__memcp_load_context", "hooks": [
-        {"type": "command", "command": "python .claude/hooks/reset-counter.py"}
-      ]},
-      {"matcher": "mcp__memory__memcp_recall", "hooks": [
-        {"type": "command", "command": "python .claude/hooks/post-recall-reinforce.py"}
-      ]}
+      {
+        "matcher": "mcp__memory__memcp_remember",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/reset-counter.py"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/track-summary.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__memory__memcp_load_context",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/reset-counter.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__memory__memcp_recall",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/post-recall-reinforce.py"
+          }
+        ]
+      }
     ]
   }
 }

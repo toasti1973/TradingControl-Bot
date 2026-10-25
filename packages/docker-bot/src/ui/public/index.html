@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradingControl Bot</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <link rel="stylesheet" href="/css/style.css?v=20260404">
+</head>
+<body>
+
+  <!-- Login Overlay -->
+  <div id="login-overlay" class="login-overlay">
+    <div class="login-container">
+      <div class="login-logo">
+        <h1>TC Bot</h1>
+        <span>TradingControl</span>
+      </div>
+      <form id="login-form" onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label for="login-password">Passwort</label>
+          <input type="password" id="login-password" placeholder="Passwort eingeben..." autofocus required>
+        </div>
+        <div id="login-error" class="login-error" style="display:none"></div>
+        <button type="submit" class="btn btn-primary login-btn" id="login-btn">Anmelden</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- App -->
+  <div id="app-container" class="app" style="display:none">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-logo">
+        <h1>TC Bot</h1>
+        <span>TradingControl</span>
+      </div>
+      <a id="nav-dashboard" class="nav-item active" href="#dashboard" onclick="navigate('dashboard')">
+        <span class="nav-text">Dashboard</span>
+      </a>
+      <a id="nav-plans" class="nav-item" href="#plans" onclick="navigate('plans')">
+        <span class="nav-text">Plaene</span>
+      </a>
+      <a id="nav-planning" class="nav-item" href="#planning" onclick="navigate('planning')">
+        <span class="nav-text">Tradeplanung</span>
+      </a>
+      <a id="nav-tradeplans" class="nav-item" href="#tradeplans" onclick="navigate('tradeplans')">
+        <span class="nav-text">Trade Plans</span>
+      </a>
+      <a id="nav-signale" class="nav-item" href="#signale" onclick="navigate('signale')">
+        <span class="nav-text">Signale</span>
+      </a>
+      <a id="nav-trades" class="nav-item" href="#trades" onclick="navigate('trades')">
+        <span class="nav-text">Trade History</span>
+      </a>
+      <a id="nav-copytrading" class="nav-item" href="#copytrading" onclick="navigate('copytrading')">
+        <span class="nav-text">CopyTrading</span>
+      </a>
+      <a id="nav-settings" class="nav-item" href="#settings" onclick="navigate('settings')">
+        <span class="nav-text">Einstellungen</span>
+      </a>
+      <a id="nav-logs" class="nav-item" href="#logs" onclick="navigate('logs')">
+        <span class="nav-text">Logs</span>
+      </a>
+      <div style="flex:1"></div>
+      <a class="nav-item" href="#" onclick="logout()">
+        <span class="nav-text">Abmelden</span>
+      </a>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- Dashboard -->
+      <section id="page-dashboard">
+        <div class="page-header">
+          <h2>Dashboard</h2>
+          <div>
+            <button id="btn-start" class="btn btn-primary" onclick="startBot()">Bot starten</button>
+            <button id="btn-stop" class="btn btn-danger" onclick="stopBot()" style="display:none">Bot stoppen</button>
+          </div>
+        </div>
+
+        <div class="cards">
+          <div class="card">
+            <div class="card-label">Status</div>
+            <div class="card-value"><span id="stat-status" class="badge badge-default">--</span></div>
+          </div>
+          <div class="card">
+            <div class="card-label">Broker</div>
+            <div class="card-value" id="stat-broker">--</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Aktive Plaene</div>
+            <div class="card-value" id="stat-plans">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Trades gesamt</div>
+            <div class="card-value" id="stat-trades">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Uptime</div>
+            <div class="card-value" id="stat-uptime">--</div>
+          </div>
+        </div>
+
+        <!-- KPIs -->
+        <div class="cards" style="margin-bottom:16px;">
+          <div class="card">
+            <div class="card-label">Eingesetzte Margin</div>
+            <div class="card-value" id="kpi-margin">--</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Realisierter PnL</div>
+            <div class="card-value" id="kpi-pnl">--</div>
+          </div>
+          <div class="card">
+            <div class="card-label">ROI</div>
+            <div class="card-value" id="kpi-roi">--</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Unrealisierter PnL</div>
+            <div class="card-value" id="kpi-upnl">--</div>
+          </div>
+        </div>
+
+        <!-- Connection Status -->
+        <div id="conn-card" class="card" style="margin-bottom: 24px;">
+          <div class="card-label" style="margin-bottom:8px;">Verbindungen</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span id="conn-tc-dot" class="dot dot-red"></span>
+              <span>TC API</span>
+              <span id="conn-tc-ping" style="color:var(--text-muted);margin-left:auto;">--</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span id="conn-broker-dot" class="dot dot-red"></span>
+              <span id="conn-broker-name">Broker</span>
+              <span id="conn-broker-ping" style="color:var(--text-muted);margin-left:auto;">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div id="error-card" class="card" style="display:none; border-color: var(--red); margin-bottom: 24px;">
+          <div class="card-label" style="color: var(--red);">Letzter Fehler</div>
+          <div id="stat-error" style="margin-top: 8px; font-size: 13px; color: var(--text-secondary);"></div>
+        </div>
+
+        <!-- RiskGuard Status -->
+        <div id="risk-card" class="card" style="display:none; margin-bottom: 24px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="card-label" style="margin:0;">Risiko-Management</div>
+            <span id="risk-badge" class="badge badge-green">OK</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:13px;">
+            <div>
+              <span style="color:var(--text-muted)">Tagesverlust:</span>
+              <span id="risk-daily">0%</span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted)">Wochenverlust:</span>
+              <span id="risk-weekly">0%</span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted)">Drawdown:</span>
+              <span id="risk-drawdown">0%</span>
+            </div>
+          </div>
+          <div id="risk-cooldowns" style="margin-top:8px;font-size:12px;color:var(--yellow);display:none;"></div>
+          <div id="risk-halt-reason" style="margin-top:8px;font-size:13px;color:var(--red);display:none;"></div>
+        </div>
+
+        <!-- Volatility -->
+        <div id="vol-card" class="card" style="display:none; margin-bottom: 24px;">
+          <div class="card-label" style="margin-bottom:8px;">Volatilitaet (ATR)</div>
+          <div id="vol-symbols" style="font-size:13px;"></div>
+        </div>
+
+        <h3 style="margin-bottom: 12px; font-size: 15px;">Aktive Plaene</h3>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr><th>Symbol</th><th>Richtung</th><th>Groesse</th><th>Fortschritt</th><th>SL</th><th>Kurs</th><th>Ergebnis</th><th>Status</th><th>Quelle</th><th>Start</th><th></th></tr>
+            </thead>
+            <tbody id="active-plans-body">
+              <tr><td colspan="11" class="empty-state">Keine aktiven Plaene</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Plans -->
+      <section id="page-plans" style="display:none">
+        <div class="page-header"><h2>Handelsplaene</h2></div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Status</th><th>Bot</th><th>Ergebnis</th><th>Quelle</th><th>Erstellt</th><th></th></tr>
+            </thead>
+            <tbody id="plans-body">
+              <tr><td colspan="10" class="empty-state">Keine Plaene vorhanden</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tradeplanung (local) -->
+      <section id="page-planning" style="display:none">
+        <div class="page-header">
+          <h2>Tradeplanung</h2>
+          <button class="btn btn-primary" onclick="showPlanForm()">Neuer Plan</button>
+        </div>
+
+        <div id="planning-alert" style="display:none" class="settings-alert"></div>
+
+        <!-- Plan List -->
+        <div id="local-plans-list" class="table-container">
+          <table>
+            <thead>
+              <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Groesse</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th><th>Aktionen</th></tr>
+            </thead>
+            <tbody id="local-plans-body">
+              <tr><td colspan="10" class="empty-state">Keine lokalen Plaene vorhanden</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Plan Form (overlay) -->
+        <div id="plan-form-overlay" class="plan-overlay" style="display:none">
+          <div class="plan-form-container">
+            <div class="plan-form-header">
+              <h3>Neuer Trade-Plan</h3>
+              <button class="btn" onclick="hidePlanForm()">&times;</button>
+            </div>
+
+            <div class="plan-form-body">
+              <!-- Symbol + Direction -->
+              <div class="form-row" style="grid-template-columns: 1fr auto auto;">
+                <div class="form-group">
+                  <label for="pf-symbol">Symbol</label>
+                  <input type="text" id="pf-symbol" placeholder="BTCUSDT" style="text-transform:uppercase">
+                </div>
+                <div class="form-group">
+                  <label>Markttyp</label>
+                  <div class="toggle-group">
+                    <button type="button" class="toggle-btn" data-field="pf-market" data-value="spot" onclick="setToggle(this)">Spot</button>
+                    <button type="button" class="toggle-btn active" data-field="pf-market" data-value="futures" onclick="setToggle(this)">Futures</button>
+                  </div>
+                  <input type="hidden" id="pf-market" value="futures">
+                </div>
+                <div class="form-group">
+                  <label>Richtung</label>
+                  <div class="toggle-group">
+                    <button type="button" class="toggle-btn toggle-green active" data-field="pf-direction" data-value="long" onclick="setToggle(this)">Long</button>
+                    <button type="button" class="toggle-btn toggle-red" data-field="pf-direction" data-value="short" onclick="setToggle(this)">Short</button>
+                  </div>
+                  <input type="hidden" id="pf-direction" value="long">
+                </div>
+              </div>
+
+              <!-- Leverage + Size -->
+              <div class="form-row" style="grid-template-columns: 100px 1fr;">
+                <div class="form-group">
+                  <label for="pf-leverage">Hebel</label>
+                  <div style="display:flex;align-items:center;gap:4px;">
+                    <input type="number" id="pf-leverage" value="1" min="1" max="100" step="1">
+                    <span style="color:var(--text-muted)">x</span>
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label for="pf-total-size">Gesamtgroesse (Asset)</label>
+                  <input type="number" id="pf-total-size" step="any" min="0" placeholder="z.B. 0.01">
+                </div>
+              </div>
+
+              <hr class="form-divider">
+
+              <!-- Entry Strategy -->
+              <div class="form-row" style="grid-template-columns: auto 1fr;">
+                <div class="form-group">
+                  <label for="pf-entry-strategy">Entry-Strategie</label>
+                  <select id="pf-entry-strategy" onchange="onEntryStrategyChange()">
+                    <option value="single">Einzeln</option>
+                    <option value="equal">Gleichmaessig</option>
+                    <option value="ascending">Aufsteigend</option>
+                    <option value="descending">Absteigend</option>
+                  </select>
+                </div>
+                <div class="form-group" id="pf-entry-single-group">
+                  <label for="pf-entry-price">Entry-Preis</label>
+                  <input type="number" id="pf-entry-price" step="any" min="0" placeholder="z.B. 70770">
+                </div>
+              </div>
+
+              <!-- DCA Entry fields (hidden by default) -->
+              <div id="pf-entry-range-group" style="display:none">
+                <div class="form-row" style="grid-template-columns: 1fr 1fr 80px;">
+                  <div class="form-group">
+                    <label for="pf-entry-from">Preis Von</label>
+                    <input type="number" id="pf-entry-from" step="any" min="0">
+                  </div>
+                  <div class="form-group">
+                    <label for="pf-entry-to">Preis Bis</label>
+                    <input type="number" id="pf-entry-to" step="any" min="0">
+                  </div>
+                  <div class="form-group">
+                    <label for="pf-entry-steps">Stufen</label>
+                    <input type="number" id="pf-entry-steps" value="3" min="2" max="50" step="1">
+                  </div>
+                </div>
+              </div>
+
+              <hr class="form-divider">
+
+              <!-- Activation Conditions -->
+              <div class="form-group">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                  <label>Aktivierungspreise <span style="color:var(--text-muted);font-weight:normal">(optional, max. 2 — sequenziell)</span></label>
+                  <button class="btn" id="btn-add-activation" onclick="addActivationCondition()" style="font-size:12px;padding:2px 10px;">+ Preis hinzufuegen</button>
+                </div>
+                <div id="pf-activations-list"></div>
+                <span class="form-hint">Trade wird nur eroeffnet wenn diese Preise in dieser Reihenfolge erreicht wurden.</span>
+              </div>
+
+              <hr class="form-divider">
+
+              <!-- Take Profits -->
+              <div class="form-group">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                  <label>Take-Profit-Stufen</label>
+                  <button class="btn" onclick="addTakeProfit()" style="font-size:12px;padding:2px 10px;">+ TP hinzufuegen</button>
+                </div>
+                <div id="pf-tp-header" class="tp-header" style="display:none">
+                  <span>Zielpreis</span><span>Anteil %</span><span>Menge</span><span>SL-Adj.</span><span></span>
+                </div>
+                <div id="pf-tp-list"></div>
+              </div>
+
+              <hr class="form-divider">
+
+              <!-- Stop Loss -->
+              <div class="form-group">
+                <label><strong>Stop-Loss</strong></label>
+              </div>
+              <div class="form-row" style="grid-template-columns: 1fr auto;">
+                <div class="form-group">
+                  <label for="pf-sl-price">SL-Preis</label>
+                  <input type="number" id="pf-sl-price" step="any" min="0" placeholder="Preis eingeben">
+                </div>
+                <div class="form-group">
+                  <label for="pf-sl-type">Typ</label>
+                  <select id="pf-sl-type" onchange="onSlTypeChange()">
+                    <option value="fixed">Fixed</option>
+                    <option value="trailing">Trailing</option>
+                  </select>
+                </div>
+              </div>
+              <div id="pf-trailing-group" style="display:none">
+                <div class="form-row" style="grid-template-columns: 1fr 1fr;">
+                  <div class="form-group">
+                    <label for="pf-trailing-pct">Trailing Abstand %</label>
+                    <input type="number" id="pf-trailing-pct" step="0.1" min="0.1" max="100" placeholder="z.B. 1.5">
+                  </div>
+                  <div class="form-group">
+                    <label for="pf-trailing-activation">Aktivierung bei Preis</label>
+                    <input type="number" id="pf-trailing-activation" step="any" min="0" placeholder="optional">
+                  </div>
+                </div>
+              </div>
+
+              <hr class="form-divider">
+
+              <!-- Notes -->
+              <div class="form-group">
+                <label for="pf-notes">Notizen</label>
+                <textarea id="pf-notes" rows="3" placeholder="Notizen zum Trade-Plan..." style="width:100%;padding:8px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-size:13px;font-family:var(--font);resize:vertical;"></textarea>
+              </div>
+            </div>
+
+            <div class="plan-form-footer">
+              <button class="btn" onclick="hidePlanForm()">Abbrechen</button>
+              <button class="btn btn-primary" id="btn-save-plan" onclick="savePlan()">Plan speichern</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Signale: Eingangsbuch + Uebungskonto -->
+      <section id="page-signale" style="display:none">
+        <div class="page-header">
+          <h2>Signal-Eingang</h2>
+          <span id="sig-uebungshinweis" class="badge badge-yellow" style="display:none">Uebungsbetrieb</span>
+        </div>
+
+        <!-- Uebungskonto -->
+        <div class="cards" style="margin-bottom:20px;">
+          <div class="card">
+            <div class="card-label">Kontostand</div>
+            <div class="card-value" id="uk-equity">–</div>
+            <div class="card-label" id="uk-equity-sub" style="margin-top:4px"></div>
+          </div>
+          <div class="card">
+            <div class="card-label">Ergebnis</div>
+            <div class="card-value" id="uk-ergebnis">–</div>
+            <div class="card-label" id="uk-ergebnis-sub" style="margin-top:4px"></div>
+          </div>
+          <div class="card">
+            <div class="card-label">Gebuehren</div>
+            <div class="card-value" id="uk-gebuehren">–</div>
+            <div class="card-label" id="uk-gebuehren-sub" style="margin-top:4px"></div>
+          </div>
+          <div class="card">
+            <div class="card-label">Trades</div>
+            <div class="card-value" id="uk-trades">–</div>
+            <div class="card-label" id="uk-trefferquote" style="margin-top:4px"></div>
+          </div>
+          <div class="card">
+            <div class="card-label">Gebunden / Frei</div>
+            <div class="card-value" id="uk-gebunden" style="font-size:18px">–</div>
+          </div>
+        </div>
+
+        <!-- Eingangsbuch -->
+        <div class="table-container" style="margin-bottom:20px;">
+          <div class="page-header" style="padding:12px 16px;">
+            <h3 style="font-size:15px">Eingegangene Signale</h3>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <select id="sig-filter" onchange="updateSignale()" class="form-input" style="width:auto">
+                <option value="">alle</option>
+                <option value="accepted">angenommen</option>
+                <option value="rejected_schema">inhaltlich abgelehnt</option>
+                <option value="rejected_scaling">nach Umrechnung abgelehnt</option>
+                <option value="duplicate">Wiederholung</option>
+                <option value="no_match">ohne Treffer</option>
+              </select>
+              <button class="btn btn-secondary" onclick="updateSignale()">Aktualisieren</button>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Zeit</th><th>Strategie</th><th>Symbol</th><th>Aktion</th>
+                <th>Status</th><th>Verlauf</th><th>Ausgang</th>
+                <th>Faktor</th><th>Margin</th><th>Risiko</th><th>Grund / Hinweis</th>
+              </tr>
+            </thead>
+            <tbody id="sig-body">
+              <tr><td colspan="11" class="empty-state">Noch kein Signal eingegangen</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Kontoblatt -->
+        <div class="table-container">
+          <div class="page-header" style="padding:12px 16px;">
+            <h3 style="font-size:15px">Kontoblatt</h3>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Zeit</th><th>Art</th><th>Symbol</th><th>Menge</th><th>Preis</th><th>Betrag</th><th>Notiz</th></tr>
+            </thead>
+            <tbody id="uk-ledger">
+              <tr><td colspan="7" class="empty-state">Keine Buchungen</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Trades -->
+      <section id="page-trades" style="display:none">
+        <div class="page-header"><h2>Trade-Historie</h2></div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr><th>Zeit</th><th>Symbol</th><th>Aktion</th><th>Groesse</th><th>Avg. Entry</th><th>PnL</th><th>ROI</th><th>Plan</th></tr>
+            </thead>
+            <tbody id="trades-body">
+              <tr><td colspan="8" class="empty-state">Keine Trades vorhanden</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Trade Plans (TC + lokal, mit Indicator-Triggers) -->
+      <section id="page-tradeplans" style="display:none">
+        <div class="page-header">
+          <h2>Trade Plans</h2>
+          <span class="page-subtitle">TC-Plaene + lokale Plaene mit Indicator-Triggers (RSI/MACD/etc.)</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+            <button class="btn" onclick="syncTradePlans()">TC-Sync</button>
+          </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="cards" style="margin-bottom:20px;">
+          <div class="card">
+            <div class="card-label">Plaene gesamt</div>
+            <div class="card-value" id="tp-stat-total">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Aus TC</div>
+            <div class="card-value" id="tp-stat-tc">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Lokal</div>
+            <div class="card-value" id="tp-stat-local">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Aus Signalen</div>
+            <div class="card-value" id="tp-stat-signal">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Aktiv ueberwacht</div>
+            <div class="card-value" id="tp-stat-monitoring" style="color:var(--green)">0</div>
+          </div>
+        </div>
+
+        <!-- Plan-Tabelle -->
+        <div class="card">
+          <h3 class="settings-section-title">Aktive Plaene</h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Quelle</th>
+                  <th>Symbol</th>
+                  <th>Richtung</th>
+                  <th>Strategy</th>
+                  <th>Zonen / Entries</th>
+                  <th>TPs</th>
+                  <th>SL</th>
+                  <th>Activation</th>
+                  <th>Trigger</th>
+                  <th>Status</th>
+                  <th>Monitor</th>
+                </tr>
+              </thead>
+              <tbody id="tp-body">
+                <tr><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine Plaene</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- CopyTrading -->
+      <section id="page-copytrading" style="display:none">
+        <div class="page-header">
+          <h2>CopyTrading</h2>
+          <span class="page-subtitle">Intelligent Wallet-Tracking &amp; KI-gesteuertes Trading</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+            <span id="ct-monitor-status" class="badge badge-default">Inaktiv</span>
+            <button class="btn btn-primary" id="ct-start-btn" onclick="toggleCtMonitoring()">Monitoring starten</button>
+          </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="cards" style="margin-bottom:20px;">
+          <div class="card">
+            <div class="card-label">Tracked Wallets</div>
+            <div class="card-value" id="ct-stat-wallets">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Signale (gesamt)</div>
+            <div class="card-value" id="ct-stat-signals">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Ausgefuehrt</div>
+            <div class="card-value" id="ct-stat-executed" style="color:var(--green)">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Uebersprungen</div>
+            <div class="card-value" id="ct-stat-skipped" style="color:var(--text-muted)">0</div>
+          </div>
+        </div>
+
+        <!-- CopyTrade Positionen -->
+        <div class="card" style="margin-bottom:20px;">
+          <h3 class="settings-section-title">Paper-Trade Positionen</h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Richtung</th>
+                  <th>Entry</th>
+                  <th>Groesse</th>
+                  <th>Margin</th>
+                  <th>SL</th>
+                  <th>TP</th>
+                  <th>Trailing</th>
+                  <th>PnL</th>
+                  <th>Status</th>
+                  <th>Geoeffnet</th>
+                </tr>
+              </thead>
+              <tbody id="ct-positions-body">
+                <tr><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine Positionen</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Wallet Management -->
+        <div class="card" style="margin-bottom:20px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <h3 class="settings-section-title" style="margin:0;border:none;padding:0;">Wallet-Verwaltung</h3>
+            <div style="display:flex;gap:8px;">
+              <button class="btn" id="ct-scan-btn" onclick="scanLeaderboard()">Leaderboard scannen</button>
+              <button class="btn btn-primary" onclick="showAddWalletDialog()">+ Wallet hinzufuegen</button>
+            </div>
+          </div>
+
+          <!-- Add Wallet Form (hidden) -->
+          <div id="ct-add-wallet" style="display:none;margin-bottom:16px;padding:12px;background:var(--bg-secondary);border-radius:var(--radius);border:1px solid var(--border);">
+            <div class="form-row" style="grid-template-columns:1fr 200px auto;gap:8px;">
+              <div class="form-group" style="margin:0;">
+                <input type="text" id="ct-wallet-address" placeholder="0x... Ethereum-Adresse" style="width:100%;">
+              </div>
+              <div class="form-group" style="margin:0;">
+                <input type="text" id="ct-wallet-label" placeholder="Label (optional)">
+              </div>
+              <div style="display:flex;gap:4px;align-items:flex-start;padding-top:0;">
+                <button class="btn btn-primary" onclick="addCtWallet()">Hinzufuegen</button>
+                <button class="btn" onclick="hideAddWalletDialog()">Abbrechen</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Wallet Table -->
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Adresse</th>
+                  <th>Label</th>
+                  <th>Score</th>
+                  <th>Tier</th>
+                  <th>Win Rate</th>
+                  <th>Sharpe</th>
+                  <th>Avg Lev.</th>
+                  <th>Streak</th>
+                  <th>Quelle</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="ct-wallet-body">
+                <tr><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine Wallets getrackt</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Signal Feed -->
+        <div class="card">
+          <h3 class="settings-section-title">Signal-Feed &amp; KI-Entscheidungen</h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Wallet</th>
+                  <th>Signal</th>
+                  <th>Symbol</th>
+                  <th>Richtung</th>
+                  <th>Leverage</th>
+                  <th>Conviction</th>
+                  <th>Status</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="ct-signal-body">
+                <tr><td colspan="9" style="text-align:center;color:var(--text-muted);">Keine Signale</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section id="page-settings" style="display:none">
+        <div class="page-header">
+          <h2>Einstellungen</h2>
+          <div>
+            <button class="btn" id="btn-test-api" onclick="testTcApi()">API testen</button>
+            <button class="btn btn-primary" id="btn-save-settings" onclick="saveSettings()">Speichern</button>
+          </div>
+        </div>
+
+        <div id="settings-alert" style="display:none" class="settings-alert"></div>
+
+        <div class="settings-grid">
+
+        <!-- Uebungskonto -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Uebungskonto</h3>
+          <p class="form-hint" style="margin-bottom:12px">
+            Auf diesen Kontostand rechnet der Bot die Groesse jedes Signals um.
+            Gewinne, Verluste und Gebuehren werden verrechnet — der Stand wandert also mit.
+          </p>
+
+          <div class="form-group">
+            <label for="uk-neues-kapital">Startkapital zuruecksetzen</label>
+            <input type="number" id="uk-neues-kapital" placeholder="10000" step="100" min="1">
+            <span class="form-hint">
+              Verwirft Handelsgeschichte und Kontoblatt und beginnt neu.
+            </span>
+          </div>
+          <button class="btn btn-secondary" onclick="uebungskontoZuruecksetzen()">Konto zuruecksetzen</button>
+
+          <div class="form-group" style="margin-top:16px">
+            <label for="uk-einzahlung">Ein-/Auszahlung</label>
+            <input type="number" id="uk-einzahlung" placeholder="z. B. 2500 oder -500" step="100">
+            <span class="form-hint">Aendert das Kapital, ohne die Geschichte zu verwerfen.</span>
+          </div>
+          <button class="btn btn-secondary" onclick="uebungskontoEinzahlen()">Buchen</button>
+        </div>
+
+        <!-- Gebuehren -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Gebuehren im Uebungsbetrieb</h3>
+          <p class="form-hint" style="margin-bottom:12px">
+            Angaben in Prozent. Voreingestellt sind die Saetze von Phemex fuer
+            USDT-Dauerkontrakte. Market- und Stop-Orders zahlen Taker, liegende
+            Limit-Orders zahlen Maker.
+          </p>
+          <div class="form-group">
+            <label for="uk-taker">Taker (%)</label>
+            <input type="number" id="uk-taker" step="0.001" min="0" max="1" placeholder="0.06">
+          </div>
+          <div class="form-group">
+            <label for="uk-maker">Maker (%)</label>
+            <input type="number" id="uk-maker" step="0.001" min="0" max="1" placeholder="0.01">
+          </div>
+          <button class="btn btn-secondary" onclick="gebuehrenSpeichern()">Gebuehren speichern</button>
+        </div>
+
+        <!-- Risikoprofil -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Risikoprofil fuer Signale</h3>
+          <p class="form-hint" style="margin-bottom:12px">
+            Diese Grenzen wirken nur nach unten — sie koennen eine Position
+            verkleinern, nie vergroessern. Es gilt immer die schaerfste.
+            Einzige Ausnahme ist der Multiplikator.
+          </p>
+          <div class="form-group">
+            <label for="rp-capital-fraction">Anteil des Kapitals (0–1)</label>
+            <input type="number" id="rp-capital-fraction" step="0.05" min="0" max="1" placeholder="1">
+            <span class="form-hint">1 = das ganze Konto, 0.5 = die Haelfte.</span>
+          </div>
+          <div class="form-group">
+            <label for="rp-multiplier">Multiplikator (0–10)</label>
+            <input type="number" id="rp-multiplier" step="0.1" min="0" max="10" placeholder="1">
+            <span class="form-hint">1 = massstabsgetreu zum Signalgeber.</span>
+          </div>
+          <div class="form-group">
+            <label for="rp-max-risk">Hoechstverlust je Trade (%)</label>
+            <input type="number" id="rp-max-risk" step="0.1" min="0" max="100" placeholder="2">
+            <span class="form-hint">Gemessen am Stop-Loss. 0 schaltet die Grenze ab.</span>
+          </div>
+          <div class="form-group">
+            <label for="rp-max-margin">Hoechste Margin je Trade (%)</label>
+            <input type="number" id="rp-max-margin" step="1" min="0" max="100" placeholder="20">
+          </div>
+          <div class="form-group">
+            <label for="rp-free-margin">Nutzbare freie Margin (%)</label>
+            <input type="number" id="rp-free-margin" step="1" min="0" max="100" placeholder="90">
+          </div>
+          <div class="form-group">
+            <label for="rp-below-min">Teil-Order unter Mindestgroesse</label>
+            <select id="rp-below-min" class="form-input">
+              <option value="drop">Teil-Order streichen, Rest handeln</option>
+              <option value="reject">ganzes Signal ablehnen</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="rp-min-remaining">Mindestens uebrig (%)</label>
+            <input type="number" id="rp-min-remaining" step="5" min="0" max="100" placeholder="50">
+            <span class="form-hint">Bleibt weniger uebrig, wird abgelehnt.</span>
+          </div>
+          <button class="btn btn-secondary" onclick="risikoprofilSpeichern()">Risikoprofil speichern</button>
+        </div>
+
+        <!-- TC API -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">TradingControl API</h3>
+          <div class="form-group">
+            <label for="cfg-tc-url">TC API URL</label>
+            <input type="url" id="cfg-tc-url" placeholder="https://tradingcontrol.example.com">
+          </div>
+          <div class="form-group">
+            <label for="cfg-tc-key">TC API Key</label>
+            <div class="input-with-toggle">
+              <input type="password" id="cfg-tc-key" placeholder="tc_bot_...">
+              <button type="button" class="btn-toggle-vis" onclick="toggleVisibility('cfg-tc-key', this)">Zeigen</button>
+            </div>
+            <span class="form-hint" id="cfg-tc-key-hint"></span>
+          </div>
+        </div>
+
+        <!-- Boersen -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Boersen</h3>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-nur-mica">
+              <span>Nur Boersen mit EWR-Zulassung (MiCA)</span>
+            </label>
+            <span class="form-hint">
+              Ist das gesetzt, lehnt der Bot Plaene auf Boersen ohne Zulassung ab.
+              Der Vermerk beruht auf dem hinterlegten Stand — massgeblich sind das
+              ESMA-Register und die Liste der BaFin.
+            </span>
+          </div>
+          <div class="form-group">
+            <label for="cfg-default-exchange">Boerse fuer Plaene ohne eigene Angabe</label>
+            <select id="cfg-default-exchange"></select>
+            <span class="form-hint">
+              Plaene aus dem Journal bringen ihre Boerse mit. Diese Auswahl gilt
+              fuer die im Bot angelegten Plaene und fuer Journal-Plaene ohne
+              zugeordnetes Boersen-Konto.
+            </span>
+          </div>
+          <div id="exchange-list"></div>
+        </div>
+
+        <!-- Polling -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Polling-Intervalle</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-plan-poll">Plan-Polling (ms)</label>
+              <input type="number" id="cfg-plan-poll" min="5000" step="1000">
+            </div>
+            <div class="form-group">
+              <label for="cfg-price-poll">Preis-Polling (ms)</label>
+              <input type="number" id="cfg-price-poll" min="500" step="500">
+            </div>
+            <div class="form-group">
+              <label for="cfg-order-check">Order-Check (ms)</label>
+              <input type="number" id="cfg-order-check" min="1000" step="1000">
+            </div>
+          </div>
+        </div>
+
+        <!-- Risk Management -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Risiko-Management</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-risk-daily">Max. Tagesverlust (%)</label>
+              <input type="number" id="cfg-risk-daily" min="0" max="100" step="0.5" value="5">
+            </div>
+            <div class="form-group">
+              <label for="cfg-risk-weekly">Max. Wochenverlust (%)</label>
+              <input type="number" id="cfg-risk-weekly" min="0" max="100" step="1" value="10">
+            </div>
+            <div class="form-group">
+              <label for="cfg-risk-drawdown">Max. Drawdown (%)</label>
+              <input type="number" id="cfg-risk-drawdown" min="0" max="100" step="1" value="20">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-risk-cooldown">SL-Cooldown (Min.)</label>
+              <input type="number" id="cfg-risk-cooldown" min="0" max="1440" step="15" value="120">
+            </div>
+            <div class="form-group">
+              <label for="cfg-risk-max-plans">Max. gleichzeitige Plaene</label>
+              <input type="number" id="cfg-risk-max-plans" min="1" max="20" step="1" value="5">
+            </div>
+          </div>
+        </div>
+
+        <!-- Logging -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Logging</h3>
+          <div class="form-group">
+            <label for="cfg-log-level">Log-Level</label>
+            <select id="cfg-log-level">
+              <option value="trace">Trace</option>
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Telegram Benachrichtigungen -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Telegram Benachrichtigungen</h3>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-telegram-enabled" onchange="toggleTelegramSettings()">
+              <span>Telegram aktivieren</span>
+            </label>
+          </div>
+          <div id="telegram-settings" style="display:none">
+            <div class="form-group">
+              <label for="cfg-telegram-token">Bot Token</label>
+              <div class="input-with-toggle">
+                <input type="password" id="cfg-telegram-token" placeholder="123456:ABC-DEF...">
+                <button type="button" class="btn-toggle-vis" onclick="toggleVisibility('cfg-telegram-token', this)">Zeigen</button>
+              </div>
+              <span class="form-hint" id="cfg-telegram-token-hint"></span>
+            </div>
+            <div class="form-group">
+              <label for="cfg-telegram-chatid">Chat-ID</label>
+              <input type="text" id="cfg-telegram-chatid" placeholder="123456789 oder -100123456789">
+              <span class="form-hint">Eigene Chat-ID oder Gruppen-ID (mit Minus-Zeichen)</span>
+            </div>
+            <div class="form-group" style="margin-top:12px;">
+              <label style="margin-bottom:8px; font-weight:500;">Benachrichtigungen pro Event</label>
+              <div class="telegram-toggles">
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-order-placed" checked><span>Order platziert</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-order-filled" checked><span>Order gefuellt</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-plan-activated" checked><span>Plan aktiviert</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-plan-completed" checked><span>Plan abgeschlossen</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-plan-error" checked><span>Plan-Fehler</span></label>
+                <label class="checkbox-label"><input type="checkbox" id="cfg-tg-engine-error" checked><span>Engine-Fehler</span></label>
+              </div>
+            </div>
+            <button class="btn" id="btn-test-telegram" onclick="testTelegram()" style="margin-top:8px;">Testnachricht senden</button>
+          </div>
+        </div>
+
+        <!-- Passwort aendern -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Sicherheit</h3>
+          <div class="form-group">
+            <label for="pw-old">Aktuelles Passwort</label>
+            <input type="password" id="pw-old" placeholder="Aktuelles Passwort">
+          </div>
+          <div class="form-group">
+            <label for="pw-new">Neues Passwort</label>
+            <input type="password" id="pw-new" placeholder="Neues Passwort (min. 4 Zeichen)">
+          </div>
+          <div class="form-group">
+            <label for="pw-confirm">Neues Passwort bestaetigen</label>
+            <input type="password" id="pw-confirm" placeholder="Neues Passwort wiederholen">
+          </div>
+          <button class="btn" id="btn-change-pw" onclick="changePassword()">Passwort aendern</button>
+        </div>
+
+        <!-- CopyTrading Settings -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">CopyTrading / KI</h3>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="set-ct-enabled"> CopyTrading aktivieren
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="set-claude-api-key">Claude API-Key</label>
+            <div class="input-with-toggle">
+              <input type="password" id="set-claude-api-key" placeholder="sk-ant-...">
+              <button type="button" class="btn-toggle-vis" onclick="toggleVis('set-claude-api-key')">Zeigen</button>
+            </div>
+            <span class="form-hint">Anthropic API-Key fuer KI-Conviction-Analyse</span>
+          </div>
+          <div class="form-group">
+            <label for="set-ct-claude-model">Claude-Modell</label>
+            <select id="set-ct-claude-model">
+              <option value="claude-sonnet-4-20250514">Sonnet 4 (schnell, guenstig)</option>
+              <option value="claude-opus-4-20250514">Opus 4 (genauer, teurer)</option>
+              <option value="claude-haiku-4-5-20251001">Haiku 4.5 (am schnellsten)</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="set-ct-portfolio">Portfolio ($)</label>
+              <input type="number" id="set-ct-portfolio" value="1000" min="100" step="100">
+            </div>
+            <div class="form-group">
+              <label for="set-ct-min-combined">Min. Combined Score</label>
+              <input type="number" id="set-ct-min-combined" value="60" min="0" max="100" step="5">
+            </div>
+            <div class="form-group">
+              <label for="set-ct-min-conviction">Min. Conviction Score</label>
+              <input type="number" id="set-ct-min-conviction" value="55" min="0" max="100" step="5">
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /settings-grid -->
+
+        <p class="settings-footer">
+          Umgebungsvariablen (.env) dienen als Standardwerte. Hier gespeicherte Einstellungen
+          haben Vorrang. Nach dem Speichern wird der Bot automatisch neu gestartet.
+        </p>
+      </section>
+
+      <!-- Logs -->
+      <section id="page-logs" style="display:none">
+        <div class="page-header">
+          <h2>Logs <span class="live-dot"></span></h2>
+          <button class="btn" onclick="updateLogs()">Aktualisieren</button>
+        </div>
+        <div id="log-output" class="log-container">
+          <div class="empty-state">Warte auf Log-Eintraege...</div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Detailansicht eines Plans -->
+    <div id="plan-detail-overlay" class="plan-overlay" style="display:none" onclick="planDetailSchliessen(event)">
+      <div class="plan-form-container" style="max-width:860px" onclick="event.stopPropagation()">
+        <div class="plan-form-header">
+          <h3 id="pd-titel">Plan</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="pd-aktionen"></span>
+            <button class="btn btn-secondary" onclick="planDetailSchliessen(true)">Schliessen</button>
+          </div>
+        </div>
+        <div class="plan-form-body" id="pd-body">
+          <div class="empty-state">Wird geladen …</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- KLineChart v10.0.3, Apache 2.0 — oertlich abgelegt, kein CDN:
+       Die Sicherheitsregeln dieser Seite lassen nur eigene Skripte zu. -->
+  <script src="/vendor/klinecharts.min.js"></script>
+  <script src="/js/chart.js?v=202610251115"></script>
+  <script src="/js/signale.js?v=202610251115"></script>
+  <script src="/js/app.js?v=202610251115"></script>
+</body>
+</html>

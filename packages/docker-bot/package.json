@@ -1,0 +1,29 @@
+{
+  "name": "@tradingcontrol/docker-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-ui.mjs",
+    "dev": "tsx --watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@tradingcontrol/core": "*",
+    "@tradingcontrol/copytrading": "*",
+    "@tradingcontrol/indicators": "*",
+    "@tradingcontrol/signals": "*",
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "better-sqlite3": "^11.6.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "@types/better-sqlite3": "^7.6.0"
+  }
+}

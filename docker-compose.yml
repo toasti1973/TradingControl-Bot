@@ -1,0 +1,21 @@
+services:
+  tradingbot:
+    build: .
+    ports:
+      - "3300:3300"
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+    env_file: .env
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: "0.5"
+
+volumes:
+  bot-data:
+  bot-logs:

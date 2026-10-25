@@ -1,2 +1,35 @@
-# MCP-Konfiguration (enthält API-Keys)
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# Database
+*.db
+*.db-journal
+data/
+
+# MCP config (contains API keys)
 .mcp.json
+
+# Encrypted keys
+keys.enc
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.env.vor-signaltest.bak
