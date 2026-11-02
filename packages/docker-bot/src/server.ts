@@ -20,6 +20,7 @@ import { copytradingRoutes } from './web/routes/copytrading.js';
 import { CopyTradingService } from './services/copytrading-service.js';
 import { TradePlanMonitor } from './services/trade-plan-monitor.js';
 import { TcPlanSyncService } from './services/tc-plan-sync-service.js';
+import { TcRueckkanalService } from './services/tc-rueckkanal-service.js';
 import { createTradePlansRouter } from './web/routes/trade-plans.js';
 import { BrokerRegistry } from './services/broker-factory.js';
 import { TcApiClient } from '@tradingcontrol/core';
@@ -28,6 +29,7 @@ import { PaperAccountService } from './services/paper-account-service.js';
 import { SignalService } from './services/signal-service.js';
 import { createSignalWebhookRouter } from './web/routes/signal-webhook.js';
 import { createSignalsRouter } from './web/routes/signals.js';
+import { createKennzahlenRouter } from './web/routes/kennzahlen.js';
 import { createUebungskontoRouter } from './web/routes/uebungskonto.js';
 import { KerzenService } from './services/kerzen-service.js';
 
@@ -103,7 +105,29 @@ async function main() {
     store, logger, effectiveConfig.uebungsKapital, effectiveConfig.uebungsWaehrung,
   );
 
-  const brokers = new BrokerRegistry(effectiveConfig, uebungskonto.getKonto());
+  const brokers = new BrokerRegistry(
+    effectiveConfig,
+    uebungskonto.getKonto(),
+    // Das Orderbuch des Uebungsbrokers nach einem Neustart wieder
+    // herstellen. Ohne das bliebe jede vor dem Neustart gelegte Order
+    // fuer immer unbeachtet: Sie stuende in der Datenbank, aber der
+    // Zugang kennte sie nicht und fuellte sie nie.
+    () => store.getLiegendeOrders().map(o => ({
+      brokerOrderId: String(o.broker_order_id),
+      clientOrderId: (o.client_order_id as string | null) ?? null,
+      symbol: String(o.symbol),
+      side: o.side === 'sell' ? 'sell' as const : 'buy' as const,
+      type: ordertypAus(String(o.order_type)),
+      quantity: Number(o.quantity) || 0,
+      price: o.price as number | null,
+      stopPrice: o.stop_price as number | null,
+      // Alles, was kein Einstieg ist, schliesst nur.
+      reduceOnly: o.role !== 'entry',
+      // Der Hebel des Plans. Ohne ihn buchte der Uebungsbroker die
+      // Fuellung mit 1 — siehe OrderParams.leverage.
+      leverage: o.plan_leverage as number | null,
+    })),
+  );
 
   // Kerzen fuer die Chart-Ansicht — oeffentliche Marktdaten, ohne Zugangsdaten.
   const kerzenDienst = new KerzenService(logger);
@@ -114,6 +138,35 @@ async function main() {
     nurUebungsbetrieb: effectiveConfig.nurUebungsbetrieb,
   });
   planMonitor.start();
+
+  // Rueckkanal an TC-Synaptrix. Nur wenn Adresse UND Token stehen: Ohne
+  // Token wiese die Gegenstelle jede Sendung mit 401 ab, und die
+  // Warteschlange fuellte sich, ohne je geleert zu werden.
+  //
+  // Dockt an die Ereignisse des Monitors an, ohne ihn anzufassen — eine
+  // Stoerung beim Melden darf keine Stoerung beim Handeln werden.
+  let tcRueckkanal: TcRueckkanalService | null = null;
+  if (
+    TcRueckkanalService.istEingerichtet(
+      effectiveConfig.tcRueckkanalUrl,
+      effectiveConfig.tcRueckkanalToken,
+    )
+  ) {
+    tcRueckkanal = new TcRueckkanalService(store, planMonitor, logger, {
+      url: effectiveConfig.tcRueckkanalUrl,
+      token: effectiveConfig.tcRueckkanalToken,
+      boerse: effectiveConfig.defaultExchange,
+    });
+    tcRueckkanal.starten();
+  } else if (effectiveConfig.tcRueckkanalUrl || effectiveConfig.tcRueckkanalToken) {
+    // Eine halbe Einrichtung sieht eingerichtet aus und liefert nichts —
+    // deshalb laut, nicht still.
+    logger.error(
+      'TC_RUECKKANAL_URL und TC_RUECKKANAL_TOKEN gehoeren zusammen. Nur eines von ' +
+        'beiden ist gesetzt; der Rueckkanal bleibt AUS, und TC-Synaptrix erfaehrt ' +
+        'nicht, was aus den Plaenen wird.',
+    );
+  }
 
   const eingerichteteBoersen = Object.keys(effectiveConfig.exchanges);
 
@@ -203,6 +256,18 @@ async function main() {
       minRemainingFraction: effectiveConfig.signale.minRemainingFraction,
       ...(gespeichertesProfil ?? {}),
     },
+  },
+  // Der Kurs beim Signaleingang — er beantwortet, ob ein ausgebliebener
+  // Trade am Signalgeber lag oder am Markt.
+  async (symbol, boerse) => {
+    try {
+      const broker = await brokers.get(boerse);
+      return await broker.getPrice(symbol);
+    } catch {
+      // Ohne Kurs bleibt die Angabe leer. Gehandelt wird trotzdem —
+      // eine Messung darf kein Signal verhindern.
+      return null;
+    }
   });
 
   if (signalDienst.istEingerichtet()) {
@@ -274,6 +339,7 @@ async function main() {
   app.use(copytradingRoutes(store, ctService, settingsService));
   app.use(createTradePlansRouter(store, planMonitor, tcPlanSync, kerzenDienst));
   app.use(createSignalsRouter(signalDienst, kapitalDienst, store, settingsService, logger));
+  app.use(createKennzahlenRouter(store, kerzenDienst));
   app.use(createUebungskontoRouter(
     uebungskonto, kapitalDienst, logger, effectiveConfig.nurUebungsbetrieb,
   ));
@@ -312,6 +378,11 @@ async function main() {
     logger.info('Shutting down...');
     tcPlanSync?.stop();
     planMonitor.stop();
+    // Erst den Takt anhalten, dann ein letztes Mal leeren — sonst
+    // bleiben die Ereignisse der letzten Sekunden bis zum naechsten
+    // Start liegen, und das sind genau die eines Abschaltvorgangs.
+    tcRueckkanal?.beenden();
+    await tcRueckkanal?.warteschlangeLeeren();
     ctService.stopAutoScan();
     await botService.stop();
     await brokers.disconnectAll();
@@ -328,3 +399,15 @@ main().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+
+/**
+ * Ordertyp aus der Datenbank in die Form des Brokers.
+ *
+ * Ein unbekannter Wert wird zu 'limit' — das ist die vorsichtigere
+ * Annahme: Ein Limit liegt und wartet, eine Market-Order fuehrt
+ * sofort aus.
+ */
+function ordertypAus(wert: string): 'limit' | 'market' | 'stop' | 'stop_limit' {
+  if (wert === 'market' || wert === 'stop' || wert === 'stop_limit') return wert;
+  return 'limit';
+}

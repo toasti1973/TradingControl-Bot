@@ -373,6 +373,33 @@ export class SqliteStore {
         consumed INTEGER NOT NULL DEFAULT 0,
         consumed_at TEXT
       );
+      -- Warteschlange des Rueckkanals an TC-Synaptrix.
+      --
+      -- Sie liegt auf der Platte und nicht im Arbeitsspeicher, weil sonst
+      -- genau die Ereignisse verloren gingen, die waehrend einer Stoerung
+      -- des Empfaengers anfielen — und zwar unbemerkt: Ein fehlendes
+      -- Ereignis ist von einem nie entstandenen nicht zu unterscheiden.
+      --
+      -- ereignis_id ist eindeutig. Dieselbe Kennung zweimal einzureihen
+      -- ist kein Fehler, sondern der Normalfall nach einem Neustart
+      -- mitten im Senden; der Empfaenger verwirft, was er kennt.
+      --
+      -- Gesendetes bleibt mit gesendet_am stehen und wird erst spaeter
+      -- aufgeraeumt. Sofort zu loeschen hiesse, nach einer Stoerung nicht
+      -- mehr sagen zu koennen, was uebergeben wurde und was nicht.
+      CREATE TABLE IF NOT EXISTS tc_rueckkanal_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ereignis_id TEXT NOT NULL UNIQUE,
+        ereignis_json TEXT NOT NULL,
+        angelegt_am TEXT NOT NULL DEFAULT (datetime('now')),
+        gesendet_am TEXT,
+        versuche INTEGER NOT NULL DEFAULT 0,
+        letzter_versuch_am TEXT,
+        letzter_fehler TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tc_rueckkanal_offen
+        ON tc_rueckkanal_queue(id) WHERE gesendet_am IS NULL;
+
       -- Uebungskonto: ein Satz je Waehrung.
       --
       -- Der Stand muss einen Neustart ueberleben. Sonst begaenne das
@@ -416,13 +443,21 @@ export class SqliteStore {
       -- Margin nach einem Neustart auf 0 — der gesamte Kontostand
       -- gaelte wieder als frei, und der naechste Trade wuerde bemessen,
       -- als sei nichts gebunden.
+      -- Hedge-Modus: Long und Short auf demselben Symbol sind ZWEI
+      -- Positionen. Der Schluessel umfasst deshalb beides.
+      --
+      -- Mit dem Symbol allein als Schluessel konnte nur eine Richtung
+      -- je Symbol bestehen — ein Long-Einstieg knabberte an einem
+      -- laufenden Short. Die Umstellung bestehender Datenbanken
+      -- besorgt migrierePaperPositionen().
       CREATE TABLE IF NOT EXISTS paper_position (
-        symbol TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
         seite TEXT NOT NULL CHECK(seite IN ('buy','sell')),
         menge REAL NOT NULL,
         einstiegspreis REAL NOT NULL,
         hebel REAL NOT NULL DEFAULT 1,
-        geaendert_am TEXT NOT NULL DEFAULT (datetime('now'))
+        geaendert_am TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (symbol, seite)
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_inbox_signal_id ON signal_inbox(signal_id);
@@ -436,6 +471,7 @@ export class SqliteStore {
     this.migrateLocalPlans();
     this.migrateExecutionReports();
     this.migrateBotTradePlans();
+    this.migrierePaperPositionen();
   }
 
   /**
@@ -528,6 +564,60 @@ export class SqliteStore {
         CREATE INDEX IF NOT EXISTS idx_bot_trade_plans_status ON bot_trade_plans(status);
         CREATE INDEX IF NOT EXISTS idx_bot_trade_plans_source ON bot_trade_plans(source);
         CREATE INDEX IF NOT EXISTS idx_bot_trade_plans_symbol ON bot_trade_plans(symbol);
+
+        COMMIT;
+      `);
+    } catch (err) {
+      try { this.db.exec('ROLLBACK;'); } catch { /* war schon zurueckgerollt */ }
+      throw err;
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
+  }
+
+  /**
+   * Stellt `paper_position` auf den Hedge-Modus um.
+   *
+   * Frueher war `symbol` allein der Primaerschluessel — je Symbol
+   * konnte nur EINE Richtung bestehen. Ein Long-Einstieg traf dann auf
+   * einen laufenden Short und knabberte ihn an, statt eine eigene
+   * Position zu eroeffnen.
+   *
+   * Idempotent: Steht der Schluessel schon richtig, geschieht nichts.
+   * Bestehende Positionen werden uebernommen — sie sind je Symbol
+   * eindeutig und passen deshalb ohne Weiteres in den neuen Schluessel.
+   */
+  private migrierePaperPositionen(): void {
+    const cols = this.db.prepare('PRAGMA table_info(paper_position)')
+      .all() as Array<{ name: string; pk: number }>;
+    if (cols.length === 0) return;   // Tabelle gibt es noch nicht.
+
+    // Teil des Primaerschluessels: pk > 0. Sind es zwei Spalten, ist
+    // die Umstellung bereits geschehen.
+    const imSchluessel = cols.filter(c => c.pk > 0).map(c => c.name);
+    if (imSchluessel.length >= 2) return;
+
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      this.db.exec(`
+        BEGIN;
+
+        CREATE TABLE paper_position_neu (
+          symbol TEXT NOT NULL,
+          seite TEXT NOT NULL CHECK(seite IN ('buy','sell')),
+          menge REAL NOT NULL,
+          einstiegspreis REAL NOT NULL,
+          hebel REAL NOT NULL DEFAULT 1,
+          geaendert_am TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (symbol, seite)
+        );
+
+        INSERT INTO paper_position_neu
+          SELECT symbol, seite, menge, einstiegspreis, hebel, geaendert_am
+          FROM paper_position;
+
+        DROP TABLE paper_position;
+        ALTER TABLE paper_position_neu RENAME TO paper_position;
 
         COMMIT;
       `);
@@ -959,6 +1049,27 @@ export class SqliteStore {
     this.db.prepare('DELETE FROM bot_trade_plan_monitors WHERE trade_plan_id = ?').run(planId);
   }
 
+  /**
+   * Plaene, die laut Monitor fertig sind, laut Plan aber noch laufen.
+   *
+   * Ein Widerspruch, der die Oberflaeche in die Irre fuehrt: Die
+   * Uebersichten fragen den Plan, nicht den Monitor. Solche Plaene
+   * standen deshalb fuer immer unter den aktiven, mit offener Position
+   * 0 und ohne dass noch etwas geschah.
+   *
+   * Bewusst eine eigene Abfrage: `getAllMonitors` laedt nur laufende
+   * Monitore und sieht die abgeschlossenen gar nicht.
+   */
+  getAbgeschlosseneMitAktivemPlan(): Array<{ trade_plan_id: string; monitor_status: string }> {
+    return this.db.prepare(`
+      SELECT m.trade_plan_id AS trade_plan_id, m.status AS monitor_status
+      FROM bot_trade_plan_monitors m
+      JOIN bot_trade_plans p ON p.id = m.trade_plan_id
+      WHERE m.status IN ('completed', 'cancelled')
+        AND p.status NOT IN ('completed', 'cancelled')
+    `).all() as Array<{ trade_plan_id: string; monitor_status: string }>;
+  }
+
   // ============================================================
   // Bot Trade Plan Orders
   // ============================================================
@@ -1010,6 +1121,32 @@ export class SqliteStore {
 
   getPlanOrder(id: string): Record<string, unknown> | undefined {
     return this.db.prepare('SELECT * FROM bot_trade_plan_orders WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  }
+
+  /**
+   * Alle Orders, die noch an einer Boerse liegen sollten.
+   *
+   * Gebraucht beim Hochfahren: Der Uebungsbroker haelt seine Orders im
+   * Arbeitsspeicher und kennt nach einem Neustart keine mehr. Ohne
+   * diese Liste bliebe jede vor dem Neustart gelegte Order fuer immer
+   * unbeachtet — sie stuende in der Datenbank, aber niemand wuerde
+   * sie je fuellen.
+   */
+  getLiegendeOrders(): Array<Record<string, unknown>> {
+    return this.db.prepare(`
+      -- Der Hebel des Plans kommt mit.
+      --
+      -- Ohne ihn wuerde die Fuellung einer vor dem Neustart gelegten
+      -- Order mit Hebel 1 gebucht: Der Uebungsbroker hielt ihn in
+      -- einer Map im Arbeitsspeicher, und zwischen dem Legen eines
+      -- Limit-Einstiegs und seiner Fuellung liegen oft Stunden.
+      SELECT o.*, p.leverage AS plan_leverage FROM bot_trade_plan_orders o
+      JOIN bot_trade_plans p ON p.id = o.trade_plan_id
+      WHERE o.status IN ('new', 'placed', 'partially_filled')
+        AND o.broker_order_id IS NOT NULL
+        AND p.status NOT IN ('completed', 'cancelled')
+      ORDER BY o.placed_at ASC
+    `).all() as Array<Record<string, unknown>>;
   }
 
   // ============================================================
@@ -1374,6 +1511,160 @@ export class SqliteStore {
       }
     });
     ersetzen(positionen);
+  }
+
+  // ============================================================
+  // Rueckkanal an TC-Synaptrix
+  // ============================================================
+  //
+  // Die Warteschlange liegt HIER und nicht im Arbeitsspeicher. Sonst
+  // gingen genau die Ereignisse verloren, die waehrend einer Stoerung
+  // anfielen — und zwar unbemerkt: Ein fehlendes Ereignis ist von einem
+  // nie entstandenen nicht zu unterscheiden.
+
+  /**
+   * Die Signalkennung von TC-Synaptrix zu einem unserer Plaene.
+   *
+   * `null` heisst: Der Plan stammt nicht aus einem Signal (von Hand
+   * angelegt, aus dem Journal gespiegelt). Solche Plaene gehoeren nicht
+   * in den Rueckkanal — die Gegenstelle kennt sie nicht, und ein Ereignis
+   * ohne Gegenstueck erzeugte dort einen Datensatz, der nie zugeordnet
+   * wird.
+   */
+  getSignalKennungZuPlan(planId: string): string | null {
+    const zeile = this.db.prepare(
+      `SELECT signal_id FROM signal_inbox
+        WHERE created_plan_id = ?
+          AND status = 'accepted'
+        ORDER BY received_at DESC
+        LIMIT 1`,
+    ).get(planId) as { signal_id?: string } | undefined;
+    return zeile?.signal_id ?? null;
+  }
+
+  rueckkanalEinreihen(ereignis: Record<string, unknown>): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO tc_rueckkanal_queue (ereignis_id, ereignis_json)
+       VALUES (?, ?)`,
+    ).run(String(ereignis['ereignis_id']), JSON.stringify(ereignis));
+  }
+
+  /**
+   * Was noch zu senden ist — aelteste zuerst.
+   *
+   * Aufgegebene bleiben STEHEN (`versuche >= hoechstversuche`), statt
+   * geloescht zu werden: Die Zahl der Aufgegebenen ist die Antwort auf
+   * "warum fehlt drueben etwas?", und geloescht gaebe es sie nicht.
+   */
+  rueckkanalOffene(
+    grenze: number,
+    hoechstversuche: number,
+  ): Array<{ id: number; ereignis: unknown }> {
+    const zeilen = this.db.prepare(
+      `SELECT id, ereignis_json FROM tc_rueckkanal_queue
+        WHERE gesendet_am IS NULL
+          AND versuche < ?
+        ORDER BY id
+        LIMIT ?`,
+    ).all(hoechstversuche, grenze) as Array<{ id: number; ereignis_json: string }>;
+
+    return zeilen.map((z) => ({ id: z.id, ereignis: JSON.parse(z.ereignis_json) as unknown }));
+  }
+
+  rueckkanalErledigen(ids: number[]): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare(
+      `UPDATE tc_rueckkanal_queue SET gesendet_am = datetime('now'), letzter_fehler = NULL
+        WHERE id = ?`,
+    );
+    this.db.transaction((liste: number[]) => { for (const id of liste) stmt.run(id); })(ids);
+  }
+
+  /**
+   * Fehlversuch festhalten.
+   *
+   * `endgueltig` setzt die Versuchszahl sofort ans Limit: Bei HTTP 400
+   * oder 401 wird der zweite Versuch genauso scheitern wie der erste
+   * (fehlerhafter Aufbau bleibt fehlerhaft, falsches Token bleibt
+   * falsch), und eine Sendung, die nie durchgeht, blockierte sonst alles
+   * dahinter.
+   */
+  rueckkanalFehlschlag(ids: number[], fehler: string, endgueltig: boolean): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare(
+      `UPDATE tc_rueckkanal_queue
+          SET versuche = CASE WHEN ? = 1 THEN 9999 ELSE versuche + 1 END,
+              letzter_fehler = ?,
+              letzter_versuch_am = datetime('now')
+        WHERE id = ?`,
+    );
+    this.db.transaction((liste: number[]) => {
+      for (const id of liste) stmt.run(endgueltig ? 1 : 0, fehler, id);
+    })(ids);
+  }
+
+  /** Netzfehler: alles Offene bekommt einen Versuch angerechnet. */
+  rueckkanalFehlschlagAlle(fehler: string): void {
+    this.db.prepare(
+      `UPDATE tc_rueckkanal_queue
+          SET versuche = versuche + 1, letzter_fehler = ?,
+              letzter_versuch_am = datetime('now')
+        WHERE gesendet_am IS NULL`,
+    ).run(fehler);
+  }
+
+  rueckkanalZustand(hoechstversuche: number): {
+    offen: number; aufgegeben: number; aeltestesIso: string | null;
+  } {
+    const z = this.db.prepare(
+      `SELECT
+         SUM(CASE WHEN gesendet_am IS NULL AND versuche <  ? THEN 1 ELSE 0 END) AS offen,
+         SUM(CASE WHEN gesendet_am IS NULL AND versuche >= ? THEN 1 ELSE 0 END) AS aufgegeben,
+         MIN(CASE WHEN gesendet_am IS NULL THEN angelegt_am END)                AS aeltestes
+       FROM tc_rueckkanal_queue`,
+    ).get(hoechstversuche, hoechstversuche) as {
+      offen: number | null; aufgegeben: number | null; aeltestes: string | null;
+    };
+    return { offen: z.offen ?? 0, aufgegeben: z.aufgegeben ?? 0, aeltestesIso: z.aeltestes };
+  }
+
+  /**
+   * Aufgegebene Ereignisse zurueck in die Warteschlange holen.
+   *
+   * **Nur solche mit einem behebbaren Fehler.** Ein 400 (Aufbau falsch)
+   * oder 401 (Token falsch) wird beim einundzwanzigsten Versuch genauso
+   * scheitern wie beim ersten; die bleiben liegen, sonst entstuende eine
+   * Endlosschleife.
+   *
+   * Ein 500 oder ein Timeout ist etwas anderes: Dort liegt die Ursache
+   * beim Empfaenger und kann behoben sein. Genau so war es am
+   * 26.10.2026 — der Fremdschluessel auf `boerse` kannte den
+   * Uebungsbroker nicht, 29 Ereignisse liefen in die Versuchsgrenze, und
+   * nach dem Eintragen eines einzigen Stammdatensatzes waeren sie alle
+   * durchgegangen. Ohne diese Funktion haette sie niemand je wieder
+   * angefasst: dauerhaft verlorene Messdaten wegen eines behobenen
+   * Fehlers.
+   */
+  rueckkanalWiederaufnehmen(hoechstversuche: number): number {
+    const ergebnis = this.db.prepare(
+      `UPDATE tc_rueckkanal_queue
+          SET versuche = 0, letzter_fehler = NULL
+        WHERE gesendet_am IS NULL
+          AND versuche >= ?
+          AND (letzter_fehler IS NULL
+               OR letzter_fehler NOT LIKE 'HTTP 4%')`,
+    ).run(hoechstversuche);
+    return ergebnis.changes;
+  }
+
+  /** Gesendetes aufraeumen — der Vorrat waechst sonst unbegrenzt. */
+  rueckkanalAufraeumen(aelterAlsTage: number): number {
+    const ergebnis = this.db.prepare(
+      `DELETE FROM tc_rueckkanal_queue
+        WHERE gesendet_am IS NOT NULL
+          AND gesendet_am < datetime('now', ?)`,
+    ).run(`-${Math.max(1, Math.trunc(aelterAlsTage))} days`);
+    return ergebnis.changes;
   }
 
   // --- Cleanup ---

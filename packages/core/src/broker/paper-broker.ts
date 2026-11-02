@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { BrokerAdapter, OrderParams, OrderResult, PositionInfo } from '../types/broker.js';
 import { PaperAccount, PHEMEX_FUTURES_GEBUEHREN, type FeeModel } from './paper-account.js';
 
@@ -46,23 +48,33 @@ interface InternalOrder {
    * ein Long, den niemand wollte.
    */
   reduceOnly: boolean;
-}
 
-interface InternalPosition {
-  symbol: string;
-  side: 'buy' | 'sell';
-  size: number;
-  entryPrice: number;
-  leverage: number;
+  /**
+   * Der Hebel, mit dem die Fuellung gebucht wird.
+   *
+   * An der Order und nicht nur in der Symbol-Map: Zwischen dem Legen
+   * eines Limit-Einstiegs und seiner Fuellung liegen oft Stunden, und
+   * ein Neustart dazwischen leert die Map. Siehe `OrderParams.leverage`.
+   */
+  leverage?: number;
+  /** Was das Konto fuer diese Fuellung an Gebuehr berechnet hat. */
+  fees?: number;
 }
 
 export class PaperBroker implements BrokerAdapter {
   readonly name = 'paper';
   private orders = new Map<string, InternalOrder>();
-  private positions = new Map<string, InternalPosition>();
+  // Keine eigene Positionsliste mehr — die fuehrt allein das Konto.
+  //
+  // Frueher stand hier eine zweite Map neben der des Kontos. Nur das
+  // Konto wird gespeichert; nach einem Neustart war die Liste des
+  // Brokers leer, waehrend das Konto seine Positionen sehr wohl kannte.
+  // Jede Nur-Schliessen-Order lief dann ins Leere: Der erste
+  // Take-Profit nach dem Hochfahren wurde abgewiesen, obwohl eine
+  // Position offen war — und der Monitor hielt ihn trotzdem fuer
+  // ausgefuehrt. Eine Tatsache gehoert in ein Buch.
   private leverages = new Map<string, number>();
   private prices = new Map<string, number>();
-  private orderCounter = 0;
   private readonly priceSource: 'phemex' | 'static';
   /** Das Uebungskonto. Fuehrt Kapital, Ergebnis und Gebuehren. */
   readonly konto: PaperAccount;
@@ -113,6 +125,77 @@ export class PaperBroker implements BrokerAdapter {
       free: { [stand.waehrung]: stand.frei },
       used: { [stand.waehrung]: stand.gebunden },
     };
+  }
+
+  /**
+   * Nimmt liegende Orders aus einem frueheren Lauf wieder auf.
+   *
+   * Die Orders dieses Zugangs leben im Arbeitsspeicher — nach einem
+   * Neustart ist die Liste leer. Eine Order, die in der Datenbank des
+   * Bots als "liegt an der Boerse" steht, waere dann unbekannt:
+   * `getOrder` liefert null, der Monitor erfaehrt nie von ihrer
+   * Fuellung, und sie fuellt auch nie.
+   *
+   * Am 26.10. traf es BNBUSDT: Take-Profit 1 lag bei 743,86, der Kurs
+   * stand bei 746,73 — zwei Mark darueber. Die Order haette fuellen
+   * MUESSEN. Sie lag in der Datenbank, der Zugang kannte sie nicht.
+   *
+   * Eine echte Boerse verliert ihr Orderbuch nicht, wenn der Bot neu
+   * startet. Dieser Zugang darf es auch nicht.
+   */
+  ordersWiederherstellen(liste: Array<{
+    brokerOrderId: string;
+    clientOrderId?: string | null;
+    symbol: string;
+    side: 'buy' | 'sell';
+    type: OrderParams['type'];
+    quantity: number;
+    price?: number | null;
+    stopPrice?: number | null;
+    reduceOnly?: boolean;
+    /**
+     * Der Hebel des Plans, zu dem diese Order gehoert.
+     *
+     * Muss mitkommen: Ohne ihn wird die Fuellung einer vor dem
+     * Neustart gelegten Order mit Hebel 1 gebucht. Siehe
+     * `OrderParams.leverage`.
+     */
+    leverage?: number | null;
+  }>): number {
+    let aufgenommen = 0;
+
+    for (const o of liste) {
+      if (!o.brokerOrderId || this.orders.has(o.brokerOrderId)) continue;
+
+      const hebel = Number(o.leverage) || 0;
+
+      this.orders.set(o.brokerOrderId, {
+        orderId: o.brokerOrderId,
+        clientOrderId: o.clientOrderId ?? o.brokerOrderId,
+        symbol: o.symbol,
+        side: o.side,
+        type: o.type,
+        quantity: o.quantity,
+        price: Number(o.price) || 0,
+        stopPrice: o.stopPrice ?? undefined,
+        status: 'new',
+        filledQuantity: 0,
+        avgFillPrice: 0,
+        timestamp: Date.now(),
+        reduceOnly: o.reduceOnly === true,
+        leverage: hebel > 0 ? hebel : undefined,
+      });
+
+      // Auch die Map fuellen — sie bleibt die Auskunft fuer alles,
+      // was ohne eigenen Hebel kommt (Notschliessungen etwa). Ein
+      // leeres Gedaechtnis nach dem Neustart war der Kern des
+      // Fehlers.
+      if (hebel > 0) this.leverages.set(o.symbol, hebel);
+
+      aufgenommen++;
+    }
+
+    return aufgenommen;
   }
 
   async connect(): Promise<void> {
@@ -175,8 +258,54 @@ export class PaperBroker implements BrokerAdapter {
     this.leverages.set(symbol, leverage);
   }
 
+  /**
+   * Mit welchem Hebel wird diese Order gebucht?
+   *
+   * Drei Quellen, in dieser Reihenfolge:
+   *
+   * 1. **Die Order selbst.** Der Plan kennt seinen Hebel und gibt ihn
+   *    mit. Das ist die einzige Quelle, die einen Neustart ueberlebt.
+   * 2. **Die Symbol-Map** aus `setLeverage()`. Richtig, solange der
+   *    Bot seit dem Platzieren durchlief.
+   * 3. **Eine bestehende Position** auf demselben Symbol. Beim
+   *    Nachkauf oder Schliessen ist ihr Hebel der einzig sinnvolle —
+   *    ein anderer ergaebe eine Position mit zwei Hebeln.
+   *
+   * Bleibt alles leer, ist 1 die Notannahme. Sie ist fast immer
+   * falsch und wird deshalb gemeldet: Eine Position mit Hebel 1
+   * bindet das Vielfache der richtigen Margin und laesst die freie
+   * Margin auf 0 fallen — womit die Risikogrenze, die sich auf sie
+   * stuetzt, stillschweigend ausfaellt.
+   */
+  private hebelFuer(params: OrderParams): number {
+    const ausOrder = Number(params.leverage) || 0;
+    if (ausOrder > 0) return ausOrder;
+
+    const ausMap = this.leverages.get(params.symbol) ?? 0;
+    if (ausMap > 0) return ausMap;
+
+    // Beide Seiten ansehen: Im Hedge-Modus fuehrt das Konto je
+    // Richtung eine eigene Position.
+    const ausPosition = this.konto.position(params.symbol, params.side)?.hebel
+      ?? this.konto.position(params.symbol, params.side === 'buy' ? 'sell' : 'buy')?.hebel
+      ?? 0;
+    if (ausPosition > 0) return ausPosition;
+
+    console.warn(
+      `[Uebungsbroker] Kein Hebel fuer ${params.symbol} bekannt — es wird mit 1 gebucht. ` +
+      'Die gebundene Margin faellt dadurch um ein Vielfaches zu hoch aus.',
+    );
+    return 1;
+  }
+
   async placeOrder(params: OrderParams): Promise<OrderResult> {
-    const orderId = `paper-${++this.orderCounter}`;
+    // Eine Kennung, die sich nicht wiederholen kann.
+    //
+    // Frueher stand hier ein fortlaufender Zaehler. Der beginnt nach
+    // jedem Neustart wieder bei 1 — waehrend in der Datenbank noch die
+    // Kennungen des vorigen Laufs stehen. Eine Nachfrage nach
+    // "paper-11" traf dann auf eine voellig andere Order.
+    const orderId = `paper-${randomUUID()}`;
     const clientOrderId = params.clientOrderId ?? orderId;
     const price = params.price ?? (await this.getPrice(params.symbol)) ?? 0;
 
@@ -194,6 +323,9 @@ export class PaperBroker implements BrokerAdapter {
       avgFillPrice: 0,
       timestamp: Date.now(),
       reduceOnly: params.reduceOnly === true,
+      // Der Hebel wird JETZT festgehalten, nicht erst beim Fuellen.
+      // Dazwischen kann ein Neustart liegen (siehe OrderParams.leverage).
+      leverage: this.hebelFuer(params),
     };
 
     // Nur-Schliessen-Orders ohne passende Position werden abgewiesen.
@@ -204,9 +336,7 @@ export class PaperBroker implements BrokerAdapter {
     // ein Long, den niemand wollte, und das Uebungskonto zeigte einen
     // Bestand, den es nie gab.
     if (order.reduceOnly) {
-      const offen = this.positions.get(params.symbol);
-      const gegenrichtung = params.side === 'buy' ? 'sell' : 'buy';
-      const schliessbar = (offen && offen.side === gegenrichtung) ? offen.size : 0;
+      const schliessbar = this.schliessbareMenge(params.symbol, params.side);
 
       if (schliessbar <= 0) {
         order.status = 'rejected';
@@ -240,9 +370,27 @@ export class PaperBroker implements BrokerAdapter {
     }
   }
 
-  async getOrder(_symbol: string, orderId: string): Promise<OrderResult | null> {
+  async getOrder(symbol: string, orderId: string): Promise<OrderResult | null> {
     const order = this.orders.get(orderId);
     if (!order) return null;
+
+    // Das Symbol MUSS stimmen.
+    //
+    // Es wurde hier lange ignoriert, und das ging schief, sobald die
+    // Kennungen sich wiederholten: Nach einem Neustart begann die
+    // Nummerierung von vorn, waehrend in der Datenbank noch Kennungen
+    // aus dem Lauf davor standen. Am 25.10. beantwortete dieser Zugang
+    // deshalb die Frage nach einer BNBUSDT-Order mit einer HYPEUSDT-
+    // Order: 122,14 Stueck zu 76,45 statt 1,67 zu 748,49. Der Bot
+    // verbuchte einen Verlust von 80.768 USDT auf einem Konto mit
+    // 10.000.
+    //
+    // Die Kennungen sind inzwischen eindeutig (randomUUID). Diese
+    // Pruefung bleibt trotzdem: Eine Antwort ueber ein anderes Symbol
+    // ist unter keinen Umstaenden richtig.
+    if (this.toPhemexSymbol(order.symbol) !== this.toPhemexSymbol(symbol)) {
+      return null;
+    }
 
     if (order.status === 'new') {
       const currentPrice = await this.getPrice(order.symbol);
@@ -266,9 +414,7 @@ export class PaperBroker implements BrokerAdapter {
           // eine Position zum Schliessen. Sie kann zwischen dem
           // Platzieren und dem Fuellen verschwunden sein.
           if (order.reduceOnly) {
-            const offen = this.positions.get(order.symbol);
-            const gegenrichtung = order.side === 'buy' ? 'sell' : 'buy';
-            const schliessbar = (offen && offen.side === gegenrichtung) ? offen.size : 0;
+            const schliessbar = this.schliessbareMenge(order.symbol, order.side);
 
             if (schliessbar <= 0) {
               order.status = 'rejected';
@@ -288,22 +434,39 @@ export class PaperBroker implements BrokerAdapter {
     return this.toOrderResult(order);
   }
 
-  async getPosition(symbol: string): Promise<PositionInfo | null> {
-    const pos = this.positions.get(symbol);
-    if (!pos || pos.size === 0) return null;
+  async getPosition(symbol: string, side?: 'buy' | 'sell'): Promise<PositionInfo | null> {
+    const pos = this.konto.position(symbol, side);
+    if (!pos) return null;
 
-    const currentPrice = (await this.getPrice(symbol)) ?? pos.entryPrice;
-    const direction = pos.side === 'buy' ? 1 : -1;
-    const unrealizedPnl = (currentPrice - pos.entryPrice) * pos.size * direction;
+    const currentPrice = (await this.getPrice(symbol)) ?? pos.einstiegspreis;
+    const direction = pos.seite === 'buy' ? 1 : -1;
+    const unrealizedPnl = (currentPrice - pos.einstiegspreis) * pos.menge * direction;
 
     return {
       symbol: pos.symbol,
-      side: pos.side,
-      size: pos.size,
-      entryPrice: pos.entryPrice,
+      side: pos.seite,
+      size: pos.menge,
+      entryPrice: pos.einstiegspreis,
       unrealizedPnl,
-      leverage: pos.leverage,
+      leverage: pos.hebel,
     };
+  }
+
+  /**
+   * Wieviel laesst sich mit einer Order dieser Seite schliessen?
+   *
+   * Eine Kauf-Order schliesst einen Short, eine Verkaufs-Order einen
+   * Long. Zeigt die offene Position in dieselbe Richtung wie die Order,
+   * wuerde sie vergroessert statt verkleinert — dann gibt es nichts zu
+   * schliessen.
+   */
+  private schliessbareMenge(symbol: string, seite: 'buy' | 'sell'): number {
+    // Im Hedge-Modus gezielt die Gegenposition nachschlagen: Zu
+    // demselben Symbol kann daneben eine gleichgerichtete offen sein,
+    // die nichts mit dieser Order zu tun hat.
+    const gegenrichtung: 'buy' | 'sell' = seite === 'buy' ? 'sell' : 'buy';
+    const offen = this.konto.position(symbol, gegenrichtung);
+    return offen ? offen.menge : 0;
   }
 
   /** Simuliert Fill-Checks für alle offenen Orders */
@@ -325,63 +488,36 @@ export class PaperBroker implements BrokerAdapter {
   }
 
   /**
-   * Verbucht einen Fill auf dem Uebungskonto und schreibt die Position
-   * fort.
+   * Verbucht einen Fill auf dem Uebungskonto.
    *
-   * Beides gehoert zusammen: Die Gebuehr faellt auf jeden Fill an, das
-   * Ergebnis nur, wenn der Fill eine Position verkleinert. Welcher Fall
-   * vorliegt, weiss das Konto selbst.
+   * Das Konto schreibt dabei die Position fort, bucht die Gebuehr und
+   * — wenn der Fill eine Position verkleinert — das Ergebnis. Der
+   * Broker fuehrt daneben kein eigenes Buch mehr.
    */
   private updatePosition(order: InternalOrder): void {
-    this.konto.ordnungAusgefuehrt({
+    const { gebuehr } = this.konto.ordnungAusgefuehrt({
       symbol: order.symbol,
       seite: order.side,
       menge: order.filledQuantity,
       preis: order.avgFillPrice,
       orderArt: order.type,
-      hebel: this.leverages.get(order.symbol) ?? 1,
+      // Der an der Order festgehaltene Hebel geht vor. Hier stand
+      // frueher `this.leverages.get(order.symbol) ?? 1` — und genau
+      // dieser Griff in eine nach jedem Neustart leere Map buchte am
+      // 02.11.2026 zwei Positionen mit Hebel 1 statt 16 und 13.
+      hebel: order.leverage ?? this.hebelFuer({
+        symbol: order.symbol, side: order.side, type: order.type,
+        quantity: order.quantity,
+      }),
+      // Im Hedge-Modus die entscheidende Angabe: Ein Kauf eroeffnet
+      // einen Long ODER schliesst einen Short. Welches von beidem,
+      // sagt allein reduceOnly.
+      schliesst: order.reduceOnly,
     });
 
-    this.positionFortschreiben(order);
-  }
-
-  private positionFortschreiben(order: InternalOrder): void {
-    const existing = this.positions.get(order.symbol);
-    const leverage = this.leverages.get(order.symbol) ?? 1;
-
-    if (!existing || existing.size === 0) {
-      this.positions.set(order.symbol, {
-        symbol: order.symbol,
-        side: order.side,
-        size: order.filledQuantity,
-        entryPrice: order.avgFillPrice,
-        leverage,
-      });
-      return;
-    }
-
-    // Gleiche Richtung: Position vergrößern
-    if (existing.side === order.side) {
-      const totalSize = existing.size + order.filledQuantity;
-      const avgPrice =
-        (existing.entryPrice * existing.size + order.avgFillPrice * order.filledQuantity) / totalSize;
-      existing.size = totalSize;
-      existing.entryPrice = avgPrice;
-    } else {
-      // Gegenrichtung: Position verkleinern/schließen
-      if (order.filledQuantity >= existing.size) {
-        const remaining = order.filledQuantity - existing.size;
-        if (remaining > 0) {
-          existing.side = order.side;
-          existing.size = remaining;
-          existing.entryPrice = order.avgFillPrice;
-        } else {
-          existing.size = 0;
-        }
-      } else {
-        existing.size -= order.filledQuantity;
-      }
-    }
+    // An der Order festhalten, nicht nur im Konto: Die Ergebnisrechnung
+    // je Plan liest die Gebuehr aus den Orders.
+    order.fees = gebuehr;
   }
 
   private toOrderResult(order: InternalOrder): OrderResult {
@@ -397,6 +533,8 @@ export class PaperBroker implements BrokerAdapter {
       filledQuantity: order.filledQuantity,
       avgFillPrice: order.avgFillPrice,
       timestamp: order.timestamp,
+      fees: order.fees,
+      feeCurrency: order.fees != null ? this.konto.waehrung : undefined,
     };
   }
 

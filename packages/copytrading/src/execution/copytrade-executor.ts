@@ -333,7 +333,10 @@ export class CopyTradeExecutor extends EventEmitter {
 
       pos.exit_price = closeResult.avgFillPrice;
       const direction = pos.direction === 'long' ? 1 : -1;
-      pos.realized_pnl = (closeResult.avgFillPrice - pos.entry_price) * pos.size * direction;
+      // Hinzuzaehlen: Was bereits per Take-Profit realisiert wurde,
+      // steht schon in `realized_pnl`, und `pos.size` ist nur noch
+      // der Rest.
+      pos.realized_pnl += (closeResult.avgFillPrice - pos.entry_price) * pos.size * direction;
       pos.status = 'closed';
       pos.exit_reason = reason;
       pos.closed_at = new Date().toISOString();
@@ -402,7 +405,15 @@ export class CopyTradeExecutor extends EventEmitter {
             }
             pos.exit_price = slOrder.avgFillPrice;
             const dir = pos.direction === 'long' ? 1 : -1;
-            pos.realized_pnl = (slOrder.avgFillPrice - pos.entry_price) * pos.size * dir;
+            // Hinzuzaehlen, NICHT ueberschreiben.
+            //
+            // `pos.size` ist zu diesem Zeitpunkt nur noch der Rest:
+            // Jeder gefuellte Take-Profit hat ihn verkleinert und
+            // seinen Gewinn bereits aufaddiert (siehe unten, `+=`).
+            // Mit `=` loeschte der Stop genau diesen Gewinn wieder —
+            // ein Trade, der TP1 mitnahm und dann gestoppt wurde,
+            // erschiene als reiner Verlust.
+            pos.realized_pnl += (slOrder.avgFillPrice - pos.entry_price) * pos.size * dir;
             pos.status = 'closed';
             pos.exit_reason = 'stop_loss';
             pos.closed_at = new Date().toISOString();

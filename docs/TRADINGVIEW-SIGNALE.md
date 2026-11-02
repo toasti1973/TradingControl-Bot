@@ -15,6 +15,10 @@ Wer nur das Datenformat für den Indikator braucht, springt zu
 Sie schließen sich nicht aus. Für verschiedene Märkte oder Strategien
 lassen sich beide nebeneinander betreiben.
 
+Daneben gibt es drei Absichten, die auf einen bestehenden Plan
+wirken: `close` und `cancel` beenden ihn,
+[`update`](#stop-verschieben-action-update) verschiebt seinen Stop.
+
 ### Weg A — Freigabe (`action: "trigger"`)
 
 Der Handelsplan liegt fertig im Bot. Größe, Hebel, Einstiegspreise,
@@ -232,6 +236,75 @@ frei.
   "tag": "ausbruch-long"
 }
 ```
+
+### Stop verschieben (`action: "update"`)
+
+Die einzige Absicht, die in einen Trade eingreift, der schon im Markt
+steht. Sie verschiebt **ausschließlich den Stop-Loss**.
+
+```json
+{
+  "signal_id": "mbcma-f23-11811710",
+  "strategy": "MBCMA-f23",
+  "emitted_at": "2026-10-26T18:42:00Z",
+  "action": "update",
+  "symbol": "BNBUSDT",
+  "target_plan_id": "a1b2c3d4-…",
+  "stop_loss_price": 739.96
+}
+```
+
+Auch gültig als `action`: `modify`, `adjust`, `sl_update`. Der
+Stop-Preis darf ebenso `sl_price`, `stop_loss` oder `sl` heißen.
+
+| Feld | Pflicht | Bedeutung |
+|---|---|---|
+| `stop_loss_price` | ja | Der neue Stop. Ohne ihn gäbe es nichts zu ändern — das Signal wird abgewiesen. |
+| `target_plan_id` | eins von beiden | Die Plan-Kennung aus dem Rückkanal. |
+| `signal_id` | eins von beiden | Trifft den Plan, der aus diesem Signal entstand. |
+
+**Ohne Zielangabe wird abgewiesen.** Bei `close` ist „alles auf diesem
+Symbol" eindeutig; ein Stop-Preis ist es nicht — er gehört zu genau
+einer Position mit genau einem Einstand.
+
+**Nur enger, nie weiter.** Ein Update, das den Stop weiter vom Kurs
+wegrücken würde, wird abgelehnt und begründet. Sonst ließe sich ein
+laufender Trade aus der Ferne riskanter machen, als er eröffnet wurde.
+Die Antwort ist trotzdem `accepted` mit Begründung: Dass der Bot
+bereits besser steht, ist kein Fehler des Absenders.
+
+Größe, Hebel und Take-Profits bleiben unantastbar. Werden sie
+mitgeschickt, werden sie verworfen.
+
+#### Wofür das gedacht ist
+
+Ein Signal rechnet seinen Break-Even-Stop auf die **geplante**
+Einstiegsstaffel. Füllt davon nur ein Teil — der Regelfall, denn nach
+dem ersten Take-Profit nimmt der Bot die restlichen Einstiege zurück
+—, liegt der vorgegebene Stop unter dem echten Einstand, und der Trade
+kann trotz mitgenommenem Gewinn im Minus enden.
+
+Über den Rückkanal meldet der Bot bei jedem Ereignis, das die Position
+verändert, den tatsächlichen Stand:
+
+```json
+"position": {
+  "einstand": "739.96",
+  "eingestiegen": "5.45596275",
+  "offen": "4.09197206",
+  "einstiege_gefuellt": 1,
+  "einstiege_gesamt": 4
+}
+```
+
+Daraus lässt sich ein Stop rechnen, der den echten Einstand trifft.
+
+**Der Bot wartet allerdings nicht darauf.** Er zieht den Stop bei
+jedem Take-Profit von sich aus auf den Einstand (CLAUDE.md,
+Regel 3ac). Ein `update` ist die genauere, spätere Korrektur — nicht
+der einzige Schutz. Zwischen dem Take-Profit und einem eintreffenden
+Update lägen sonst Warteschlangentakt, Verarbeitung und Rückweg: rund
+20 bis 40 Sekunden, in denen der alte Stop an der Börse hinge.
 
 ### Felder
 

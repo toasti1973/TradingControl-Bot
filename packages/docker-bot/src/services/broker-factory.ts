@@ -99,6 +99,25 @@ export class BrokerRegistry {
      * haenge davon ab, welcher Zugang gerade gefragt wird.
      */
     private readonly uebungskonto?: PaperAccount,
+    /**
+     * Liefert die Orders, die noch an der Boerse liegen sollten.
+     *
+     * Nur fuer den Uebungsbroker von Belang: Er haelt sein Orderbuch
+     * im Arbeitsspeicher und kennt nach einem Neustart keine Order
+     * mehr. Eine echte Boerse verliert ihr Orderbuch nicht, wenn der
+     * Bot neu startet — dieser Zugang darf es auch nicht.
+     */
+    private readonly liegendeOrders?: () => Array<{
+      brokerOrderId: string;
+      clientOrderId?: string | null;
+      symbol: string;
+      side: 'buy' | 'sell';
+      type: 'limit' | 'market' | 'stop' | 'stop_limit';
+      quantity: number;
+      price?: number | null;
+      stopPrice?: number | null;
+      reduceOnly?: boolean;
+    }>,
   ) {}
 
   /** Nach einer Aenderung der Einstellungen: alles verwerfen und neu aufbauen. */
@@ -124,6 +143,21 @@ export class BrokerRegistry {
     let broker = this.broker.get(key);
     if (!broker) {
       broker = createBroker(this.config, exchangeId, marketType, this.uebungskonto);
+
+      // Dem frisch gebauten Uebungsbroker sein Orderbuch zurueckgeben.
+      if (broker instanceof PaperBroker && this.liegendeOrders) {
+        try {
+          const zahl = broker.ordersWiederherstellen(this.liegendeOrders());
+          if (zahl > 0) {
+            // Ueber console, weil die Registry keinen Logger hat — und
+            // weil ein stiller Wiederaufbau niemandem hilft.
+            console.info(`[Uebungsbroker] ${zahl} liegende Order(s) wieder aufgenommen`);
+          }
+        } catch (err) {
+          console.warn('[Uebungsbroker] Orderbuch nicht wiederherstellbar:', err);
+        }
+      }
+
       this.broker.set(key, broker);
     }
 

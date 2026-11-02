@@ -39,6 +39,14 @@ function brokerAttrappe(optionen: {
    * pruefen will, schaltet es ab.
    */
   limitsFuellen?: boolean;
+  /**
+   * Weist Nur-Schliessen-Orders ab — wie eine Boerse, die zu dieser
+   * Order keine passende Position kennt.
+   *
+   * Genau das geschah am 25.10. im Uebungsbetrieb: Der Broker hatte
+   * seine Positionen beim Neustart verloren und wies Take-Profit 1 ab.
+   */
+  reduceOnlyAbweisen?: boolean;
 } = {}) {
   const platziert: OrderParams[] = [];
   const storniert: string[] = [];
@@ -58,6 +66,19 @@ function brokerAttrappe(optionen: {
       platziert.push(p);
       laufendeNummer++;
       const id = `boerse-${laufendeNummer}`;
+
+      if (optionen.reduceOnlyAbweisen && p.reduceOnly) {
+        return {
+          orderId: id,
+          clientOrderId: p.clientOrderId ?? '',
+          symbol: p.symbol, side: p.side, type: p.type,
+          quantity: p.quantity, price: p.price ?? 0,
+          status: 'rejected',
+          filledQuantity: 0,
+          avgFillPrice: 0,
+          timestamp: Date.now(),
+        };
+      }
 
       // Limit-Orders bleiben liegen, Market-Orders fuellen sofort —
       // wie an einer echten Boerse.
@@ -88,9 +109,14 @@ function brokerAttrappe(optionen: {
       if (!p) return null;
 
       // Gefuellt wird, was der Kurs erreicht hat — wie an einer Boerse.
-      // Dadurch lassen sich Teilfuellungen nachstellen: Entry 1 liegt im
-      // Markt, Entry 2 und 3 noch nicht.
-      if (optionen.limitsFuellen !== false && p.price != null && !gefuellteLimits.has(orderId)) {
+      //
+      // `limitsFuellen: false` steuert dabei nur die EINSTIEGE: Damit
+      // lassen sich Teilfuellungen nachstellen (Entry 1 liegt im
+      // Markt, Entry 2 und 3 noch nicht). Ausstiege erkennt man an
+      // `reduceOnly`; sie fuellen immer nach Kurs, denn genau darum
+      // werden sie im Voraus ins Orderbuch gelegt.
+      var automatisch = p.reduceOnly === true || optionen.limitsFuellen !== false;
+      if (automatisch && p.price != null && !gefuellteLimits.has(orderId)) {
         const erreicht = p.side === 'buy' ? kurs <= p.price : kurs >= p.price;
         if (erreicht) gefuellteLimits.add(orderId);
       }
@@ -167,7 +193,16 @@ function dreiEinstiegePlan() {
  * `never` auf, sobald ein Name auf beiden Seiten steht und auf einer
  * privat ist.
  */
-/** Setzt den Kurs der Attrappe und laesst den Monitor damit arbeiten. */
+/**
+ * Setzt den Kurs der Attrappe und laesst den Monitor damit arbeiten.
+ *
+ * ZWEI Durchlaeufe, nicht einer: Im ersten legt der Monitor seine
+ * Orders ins Orderbuch, im zweiten sieht er nach, ob sie gefuellt
+ * wurden. Eine echte Boerse verhaelt sich genauso — zwischen dem
+ * Legen einer Order und ihrer Fuellung liegt immer mindestens ein
+ * Augenblick, und der Bot erfaehrt davon erst beim naechsten
+ * Nachfragen.
+ */
 async function tick(
   broker: ReturnType<typeof brokerAttrappe>,
   monitor: MonitorIntern,
@@ -175,6 +210,7 @@ async function tick(
   preis: number,
 ): Promise<void> {
   broker.setKurs(preis);
+  await monitor.processPlan(state, preis);
   await monitor.processPlan(state, preis);
 }
 
@@ -190,6 +226,8 @@ interface MonitorIntern {
     triggeredEntries: Set<string>;
     einstiegeStorniert: boolean;
     status: string;
+    slCurrent: number | null;
+    errorCount: number;
   } | undefined;
 }
 
@@ -311,7 +349,18 @@ describe('TradePlanMonitor — kein Nachkauf nach dem ersten Take-Profit', () =>
     expect(neueKaeufe).toHaveLength(0);
   });
 
-  it('zieht die zurueckgenommene Menge von der offenen Position ab', async () => {
+  it('laesst stehen, was der Take-Profit NICHT geschlossen hat', async () => {
+    // Die Korrektur vom 26.10. — und der gefaehrlichste Fehler, den
+    // eine Gegenpruefung zutage foerderte:
+    //
+    // Hier stand frueher `remainingSize - entfallen - nieAbgeschickt`.
+    // Das war eine doppelte Buchung aus der Zeit, als remainingSize bei
+    // der GEPLANTEN Groesse begann. Mit 0,1 gekauft, 0,03 per
+    // Take-Profit geschlossen und 0,2 storniert fiel der Merker auf 0 —
+    // der Plan galt als abgeschlossen, waehrend 0,07 weiter im Markt
+    // standen. Abgemeldet, ohne Aufsicht, und im Dashboard unter
+    // "beendet", wo weder die gebundene Margin noch das schwebende
+    // Ergebnis mitzaehlen.
     const broker = brokerAttrappe({ limitsFuellen: false });
     const { monitor, state } = await bisTp1(broker);
 
@@ -325,8 +374,31 @@ describe('TradePlanMonitor — kein Nachkauf nach dem ersten Take-Profit', () =>
 
     await tick(broker, monitor, state, 52_100);        // TP1
 
-    // Der Take-Profit schliesst, was offen war; danach ist nichts mehr da.
-    expect(state.remainingSize).toBeCloseTo(0, 10);
+    // TP1 nimmt 30 % der geplanten 0,3 mit, also 0,09 — begrenzt auf
+    // die offenen 0,1. Was er nicht schliesst, bleibt offen.
+    const eingestiegen = store.getPlanOrders('plan-1')
+      .filter(o => o.role === 'entry')
+      .reduce((s, o) => s + Number(o.filled_quantity ?? 0), 0);
+    const geschlossen = store.getPlanOrders('plan-1')
+      .filter(o => o.role !== 'entry')
+      .reduce((s, o) => s + Number(o.filled_quantity ?? 0), 0);
+
+    expect(state.remainingSize).toBeCloseTo(eingestiegen - geschlossen, 10);
+    // Und sie ist NICHT null — die stornierten Kauf-Limits haben sie
+    // nie beruehrt.
+    expect(state.remainingSize).toBeGreaterThan(0);
+  });
+
+  it('meldet einen Plan mit Restposition NICHT als abgeschlossen', async () => {
+    const broker = brokerAttrappe({ limitsFuellen: false });
+    const { monitor, state } = await bisTp1(broker);
+
+    await tick(broker, monitor, state, 49_500);
+    await tick(broker, monitor, state, 52_100);        // TP1
+
+    // Der Plan bleibt unter Aufsicht, solange etwas im Markt steht.
+    expect(state.status).toBe('monitoring');
+    expect(store.getBotTradePlan('plan-1')!.status).not.toBe('completed');
   });
 
   it('haelt den Vorgang im Ausfuehrungsprotokoll fest', async () => {
@@ -398,13 +470,15 @@ describe('TradePlanMonitor — kein Nachkauf nach dem ersten Take-Profit', () =>
 
     await tick(broker, monitor, state, 52_100);        // TP1
 
+    // Alle Ziele liegen im Orderbuch, eines davon ist gefuellt.
     const tpOrders = store.getPlanOrders('plan-1').filter(o => o.role === 'take_profit');
-    expect(tpOrders).toHaveLength(1);
+    const gefuellte = tpOrders.filter(o => Number(o.filled_quantity ?? 0) > 0);
+
+    expect(gefuellte).toHaveLength(1);
     // Ohne diesen Eintrag waere die Schliessung aus den Orders
     // unsichtbar.
-    expect(Number(tpOrders[0]!.filled_quantity)).toBeGreaterThan(0);
-    expect(Number(tpOrders[0]!.avg_fill_price)).toBeGreaterThan(0);
-    expect(tpOrders[0]!.status).toBe('filled');
+    expect(Number(gefuellte[0]!.avg_fill_price)).toBeGreaterThan(0);
+    expect(gefuellte[0]!.status).toBe('filled');
   });
 
   it('sperrt die Einstiege auch nach einem Neustart', async () => {
@@ -434,13 +508,29 @@ describe('TradePlanMonitor — kein Nachkauf nach dem ersten Take-Profit', () =>
     expect(broker2.platziert.filter(o => o.side === 'buy')).toHaveLength(0);
   });
 
-  it('schliesst den Plan ab, wenn die Position zu ist — auch ohne den zweiten TP', async () => {
+  it('schliesst den Plan ab, wenn die Position WIRKLICH zu ist — auch ohne den zweiten TP', async () => {
     const broker = brokerAttrappe({ limitsFuellen: false });
     const { monitor, state } = await bisTp1(broker);
 
     await tick(broker, monitor, state, 52_100);        // TP1, TP2 bleibt offen
-
     expect(state.tpState[1]!.triggered).toBe(false);
+
+    // Den Rest von Hand schliessen — so, wie es ein spaeterer
+    // Take-Profit oder der Stop taete.
+    const offen = state.remainingSize;
+    expect(offen).toBeGreaterThan(0);
+
+    store.insertPlanOrder({
+      id: 'rest-zu', trade_plan_id: 'plan-1', side: 'sell', order_type: 'market',
+      role: 'take_profit', symbol: 'BTCUSDT', price: 52_100, quantity: offen,
+      status: 'filled', broker: 'attrappe',
+    });
+    store.updatePlanOrder('rest-zu', { filled_quantity: offen, avg_fill_price: 52_100 });
+
+    await tick(broker, monitor, state, 52_100);
+
+    // Jetzt — und erst jetzt — ist der Plan fertig. Die uebrigen Ziele
+    // koennten nichts mehr schliessen.
     expect(state.remainingSize).toBeCloseTo(0, 10);
     expect(state.status).toBe('completed');
   });
@@ -575,11 +665,16 @@ describe('TradePlanMonitor — kein Ausstieg ohne Einstieg', () => {
 
     await monitor.processPlan(state, 0.07740);
 
+    // Ausstiege gehen jetzt vorab ins Orderbuch — Ziele wie Stop.
     const ausstiege = broker.platziert.filter(o => o.side === 'buy');
-    expect(ausstiege).toHaveLength(1);
-    // Geschlossen wird nur, was offen ist — 0.1, nicht die geplanten 0.2.
-    expect(ausstiege[0]!.quantity).toBeCloseTo(0.1, 10);
-    expect(ausstiege[0]!.reduceOnly).toBe(true);
+    expect(ausstiege.length).toBeGreaterThan(0);
+    expect(ausstiege.every(o => o.reduceOnly === true)).toBe(true);
+
+    // Geschlossen wird nur, was offen ist — 0.1, nicht die geplanten
+    // 0.2. Das gilt fuer jede einzelne Order und fuer ihre Summe.
+    expect(ausstiege.every(o => o.quantity <= 0.1 + 1e-9)).toBe(true);
+    const summe = ausstiege.reduce((s, o) => s + o.quantity, 0);
+    expect(summe).toBeLessThanOrEqual(0.1 * 2 + 1e-9);   // Stop + Ziele
   });
 });
 
@@ -671,17 +766,200 @@ describe('TradePlanMonitor — die Regel greift nicht zu frueh', () => {
     monitor.registerPlan(plan);
     const state = monitor.getState('plan-1')!;
 
-    // Der Preis arbeitet sich stufenweise nach unten
+    // Alle drei Kauf-Limits gehen SOFORT ins Orderbuch — nicht erst,
+    // wenn der Kurs sie beruehrt.
+    //
+    // Darauf zu warten verschenkte genau das, wofuer ein Limit da ist:
+    // Es liegt an der Boerse und wird gefuellt, auch waehrend eines
+    // Neustarts oder zwischen zwei Kursabfragen. Am 25.10. standen
+    // deshalb zwei von vier Einstiegen Stunden spaeter noch auf "nicht
+    // abgeschickt", obwohl der Kurs sie laengst durchlaufen hatte.
     await monitor.processPlan(state, 50_000);
-    expect(broker.platziert.filter(o => o.side === 'buy')).toHaveLength(1);
+    expect(broker.platziert.filter(o => o.side === 'buy')).toHaveLength(3);
 
+    // Und sie werden nicht ein zweites Mal gelegt.
     await monitor.processPlan(state, 49_000);
-    expect(broker.platziert.filter(o => o.side === 'buy')).toHaveLength(2);
-
     await monitor.processPlan(state, 48_500);
     expect(broker.platziert.filter(o => o.side === 'buy')).toHaveLength(3);
 
     // Nichts wurde zurueckgenommen, solange kein TP griff
     expect(broker.storniert).toHaveLength(0);
+  });
+});
+
+// ============================================================
+// Eine abgewiesene Ausstiegs-Order hat nichts geschlossen
+//
+// Der Fund vom 25.10. im Uebungsbetrieb, und der folgenschwerste:
+// Take-Profit 1 auf BNBUSDT wurde von der Boerse abgewiesen (der
+// Uebungsbroker hatte beim Neustart seine Positionen verloren). Der
+// Monitor verbuchte ihn trotzdem als ausgefuehrt — er zog den Stop
+// nach, beendete die Einstiegsphase und erklaerte den Plan fuer
+// abgeschlossen.
+//
+// Zurueck blieben 7,68 BNB im Markt, die niemand mehr beaufsichtigte.
+// Die Anzeige behauptete einen Gewinn, den es nicht gab, und der Stop,
+// der haette greifen muessen, wurde nie geprueft.
+// ============================================================
+
+describe('TradePlanMonitor — abgewiesene Ausstiegs-Orders', () => {
+  let verzeichnis: string;
+  let store: SqliteStore;
+
+  beforeEach(() => {
+    verzeichnis = mkdtempSync(join(tmpdir(), 'monitorabweis-'));
+    store = new SqliteStore(join(verzeichnis, 'bot.db'));
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(verzeichnis, { recursive: true, force: true });
+  });
+
+  const baue = (broker: ReturnType<typeof brokerAttrappe>) =>
+    new TradePlanMonitor(broker.registry, store, stilleAusgabe, {
+      nurMicaBoersen: false,
+      defaultExchange: 'paper',
+    }) as unknown as MonitorIntern;
+
+  /**
+   * Bringt einen Plan in den Zustand "ein Einstieg gefuellt, Position
+   * offen" — genau die Lage, in der TP1 feuert.
+   */
+  async function mitOffenerPosition(broker: ReturnType<typeof brokerAttrappe>) {
+    const monitor = baue(broker);
+    const plan = dreiEinstiegePlan();
+
+    store.upsertBotTradePlan({
+      ...plan,
+      entry_orders: JSON.stringify(plan.entry_orders),
+      take_profits: JSON.stringify(plan.take_profits),
+      activation_conditions: '[]',
+      executed_orders: '[]',
+      execution_mode: 'all_limit',
+      entry_zones: null,
+    });
+    monitor.registerPlan(plan);
+    const state = monitor.getState('plan-1')!;
+
+    await tick(broker, monitor, state, 48_400);
+
+    const entries = store.getPlanOrders('plan-1').filter(o => o.role === 'entry');
+    store.updatePlanOrder(entries[0]!.id as string, {
+      status: 'filled', filled_quantity: 0.1, avg_fill_price: 50_000,
+    });
+
+    return { monitor, state };
+  }
+
+  it('haelt den Take-Profit offen, wenn die Order abgewiesen wurde', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    // Der Kurs erreicht TP1.
+    await tick(broker, monitor, state, 52_000);
+
+    // Der Versuch wurde unternommen ...
+    expect(broker.platziert.some(o => o.reduceOnly)).toBe(true);
+    // ... aber er ist gescheitert, also gilt der TP NICHT als erreicht.
+    expect(state.tpState[0]!.triggered).toBe(false);
+  });
+
+  it('zieht den Stop nach einem abgewiesenen Take-Profit NICHT nach', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+    const slVorher = state.slCurrent;
+
+    await tick(broker, monitor, state, 52_000);
+
+    // Ein nachgezogener Stop auf einen Gewinn, der nie realisiert wurde,
+    // waere die gefaehrlichste Folge: Er wuerde die Position bei einem
+    // Ruecksetzer glattstellen, den der Plan ausdruecklich aushalten
+    // sollte.
+    expect(state.slCurrent).toBe(slVorher);
+  });
+
+  it('beendet die Einstiegsphase nach einem abgewiesenen Take-Profit nicht', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    await tick(broker, monitor, state, 52_000);
+
+    // "Kein Nachkauf nach TP1" setzt voraus, dass TP1 wirklich griff.
+    expect(state.einstiegeStorniert).toBe(false);
+    expect(broker.storniert).toHaveLength(0);
+  });
+
+  it('erklaert den Plan nach einem abgewiesenen Take-Profit nicht fuer abgeschlossen', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    await tick(broker, monitor, state, 52_000);
+
+    expect(state.status).not.toBe('completed');
+    // Die Position steht weiter im Markt.
+    expect(state.remainingSize).toBeCloseTo(0.1, 10);
+  });
+
+  it('versucht den Take-Profit beim naechsten Durchlauf erneut', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    await tick(broker, monitor, state, 52_000);
+    const nachErstem = broker.platziert.filter(o => o.reduceOnly).length;
+
+    await tick(broker, monitor, state, 52_100);
+    const nachZweitem = broker.platziert.filter(o => o.reduceOnly).length;
+
+    // Aufgeben waere das Gegenteil von richtig: Die Ursache kann eine
+    // voruebergehende sein, das Ziel ist erreicht, und die Position
+    // soll heraus.
+    expect(nachZweitem).toBeGreaterThan(nachErstem);
+  });
+
+  it('haelt die Order mit ihrem Status fest', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    await tick(broker, monitor, state, 52_000);
+
+    // Der Fehlschlag muss aus der Datenbank hervorgehen — sonst sieht
+    // die Detailansicht einen Take-Profit, den es nie gab.
+    const tps = store.getPlanOrders('plan-1').filter(o => o.role === 'take_profit');
+    expect(tps.length).toBeGreaterThan(0);
+    expect(tps[0]!.status).toBe('rejected');
+    expect(Number(tps[0]!.filled_quantity)).toBe(0);
+  });
+
+  it('schliesst den Plan nach einem abgewiesenen Stop-Loss nicht ab', async () => {
+    const broker = brokerAttrappe({ reduceOnlyAbweisen: true, limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    // Der Kurs faellt unter den Stop bei 47.000.
+    await tick(broker, monitor, state, 46_500);
+
+    // Der Stop wird nebenher ausgeloest (`void executeStopLossHit`),
+    // nicht im Zug von processPlan — ohne diese Atempause praefte der
+    // Test einen Zustand, den der Monitor noch gar nicht erreicht hat.
+    await new Promise(aufloesen => setTimeout(aufloesen, 30));
+
+    // Der gefaehrlichste Fall ueberhaupt: Der Plan gaelte als
+    // abgeschlossen, waehrend die Position jenseits ihres Stops im
+    // Markt steht — und niemand mehr hinsieht.
+    expect(state.status).not.toBe('completed');
+    expect(state.remainingSize).toBeCloseTo(0.1, 10);
+    expect(state.errorCount).toBeGreaterThan(0);
+  });
+
+  it('nimmt den Take-Profit an, sobald die Boerse ihn durchlaesst', async () => {
+    // Die Gegenprobe: Ohne Abweisung laeuft alles wie bisher.
+    const broker = brokerAttrappe({ limitsFuellen: false });
+    const { monitor, state } = await mitOffenerPosition(broker);
+
+    await tick(broker, monitor, state, 52_000);
+
+    expect(state.tpState[0]!.triggered).toBe(true);
+    expect(state.einstiegeStorniert).toBe(true);
   });
 });

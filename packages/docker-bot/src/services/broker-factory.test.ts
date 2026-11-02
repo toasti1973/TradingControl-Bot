@@ -21,6 +21,10 @@ function config(ueberschreibungen: Partial<BotConfig> = {}): BotConfig {
       phemex: { apiKey: 'echter-schluessel', apiSecret: 'echtes-geheimnis', testnet: false },
       bybit: { apiKey: 'echter-schluessel', apiSecret: 'echtes-geheimnis' },
     },
+    // Rueckkanal aus: Diese Tests pruefen die Broker-Wahl, und ein
+    // eingerichteter Meldeweg hat damit nichts zu tun.
+    tcRueckkanalUrl: '',
+    tcRueckkanalToken: '',
     webUiPassword: 'x',
     webPort: 3300,
     planPollInterval: 30_000,

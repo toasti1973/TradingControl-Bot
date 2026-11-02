@@ -129,6 +129,68 @@ export class VerlaufService {
         continue;
       }
 
+      // --- Stop auf das letzte erreichte Ziel gehoben ---
+      if (rolle === 'sl_ziel_gesichert') {
+        slAktuell = this.zahl(meta.sl_neu);
+        slNachgezogen = true;
+        ereignisse.push({
+          art: 'sl_nachgezogen',
+          preis: slAktuell,
+          zeichen: 'SL→TP',
+          text: 'Stop auf das letzte erreichte Ziel gehoben' +
+            (meta.sl_vorher != null ? ` von ${Number(meta.sl_vorher).toFixed(4)}` : '') +
+            (slAktuell != null ? ` auf ${slAktuell.toFixed(4)}` : ''),
+          zeitpunkt: zeit,
+          einzelheiten: meta,
+        });
+        continue;
+      }
+
+      // --- Stop von aussen gesetzt ---
+      //
+      // Getrennt ausgewiesen, weil die Quelle zur Sache gehoert: Wer
+      // im Nachhinein fragt, warum der Stop sprang, soll nicht raten
+      // muessen, ob es der Bot, das Signal oder TC-Synaptrix war.
+      if (rolle === 'sl_extern_gesetzt') {
+        slAktuell = this.zahl(meta.sl_neu);
+        slNachgezogen = true;
+        ereignisse.push({
+          art: 'sl_nachgezogen',
+          preis: slAktuell,
+          zeichen: 'SL*',
+          text: `Stop von aussen gesetzt (${meta.quelle ?? 'unbekannt'})` +
+            (meta.sl_vorher != null ? ` von ${Number(meta.sl_vorher).toFixed(2)}` : '') +
+            (slAktuell != null ? ` auf ${slAktuell.toFixed(2)}` : ''),
+          zeitpunkt: zeit,
+          einzelheiten: meta,
+        });
+        continue;
+      }
+
+      // --- Stop auf den Einstand gezogen ---
+      //
+      // Eigener Eintrag, nicht unter `sl_adjusted` mitgefuehrt: Dies
+      // ist kein Nachziehen nach Plan, sondern die Korrektur eines
+      // Stops, der den tatsaechlichen Einstand verfehlt haette. Wer
+      // spaeter fragt, warum der Stop woanders lag als im Signal,
+      // findet hier die Antwort.
+      if (rolle === 'sl_break_even') {
+        slAktuell = this.zahl(meta.sl_neu);
+        slNachgezogen = true;
+        ereignisse.push({
+          art: 'sl_nachgezogen',
+          preis: slAktuell,
+          zeichen: 'SL=E',
+          text: 'Stop auf den Einstand gezogen' +
+            (meta.sl_vorher != null ? ` von ${Number(meta.sl_vorher).toFixed(2)}` : '') +
+            (slAktuell != null ? ` auf ${slAktuell.toFixed(2)}` : '') +
+            ' — ab hier kein Verlust mehr moeglich',
+          zeitpunkt: zeit,
+          einzelheiten: meta,
+        });
+        continue;
+      }
+
       // --- Stop nachgezogen ---
       if (rolle === 'sl_adjusted') {
         slAktuell = this.zahl(meta.sl_neu);

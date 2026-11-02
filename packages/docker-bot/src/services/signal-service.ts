@@ -107,6 +107,19 @@ export class SignalService {
     private readonly capital: CapitalService,
     private readonly logger: Logger,
     private config: SignalServiceConfig = STANDARD_SIGNAL_CONFIG,
+    /**
+     * Liefert den aktuellen Kurs eines Symbols.
+     *
+     * Gebraucht, um beim Signaleingang festzuhalten, WIE WEIT der
+     * Markt von den Einstiegen entfernt war. Ein Indikator, der seine
+     * Staffel auf einen Kurs rechnet, der beim Senden schon
+     * Viertelstunden zurueckliegt, ist nicht an seinen Trades zu
+     * messen, sondern an dieser Entfernung.
+     *
+     * Als Rueckruf, damit dieser Dienst keinen Broker kennen muss —
+     * und damit er sich ohne Boerse pruefen laesst.
+     */
+    private readonly kursGeber?: (symbol: string, boerse: string) => Promise<number | null>,
   ) {
     this.schema = this.baueSchema();
     this.auth = this.baueAuth();
@@ -223,6 +236,8 @@ export class SignalService {
         case 'close':
         case 'cancel':
           return await this.beende(signal, args);
+        case 'update':
+          return await this.verschiebeStop(signal, args);
       }
     } catch (err) {
       const nachricht = err instanceof Error ? err.message : String(err);
@@ -332,7 +347,12 @@ export class SignalService {
     }
 
     const { plan, herkunft } = this.builder.build(skaliert, decision);
-    this.speicherePlan(plan, herkunft);
+
+    // Festhalten, wie weit der Markt von den Einstiegen entfernt war.
+    const lage = await this.marktlage(plan);
+    const herkunftMitLage = lage ? { ...herkunft as object, marktlage: lage } : herkunft;
+
+    this.speicherePlan(plan, herkunftMitLage);
 
     // Der Monitor fuehrt ihn nur aus, wenn er auch handeln darf.
     if (plan.bot_enabled && plan.status !== 'planned') {
@@ -534,6 +554,121 @@ export class SignalService {
   }
 
   // ============================================================
+  // Weg D — den Stop eines laufenden Plans verschieben
+  // ============================================================
+
+  /**
+   * Setzt den Stop-Loss eines Plans neu, der bereits im Markt steht.
+   *
+   * ## Nur in die sichere Richtung
+   *
+   * Ein Update darf den Stop nie weiter vom Einstand wegruecken, als
+   * er schon ist. Sonst liesse sich ein laufender Trade nachtraeglich
+   * riskanter machen, als er eroeffnet wurde — und zwar aus der Ferne,
+   * ohne dass der Nutzer davon erfuehre. Dieselbe Einbahn gilt fuer die
+   * Grenzen des Risikoprofils (CLAUDE.md, Regel 3a).
+   *
+   * Ein abgelehntes Update ist kein Fehler des Absenders: Es bedeutet
+   * nur, dass der Bot bereits besser steht. Deshalb `accepted` mit
+   * Begruendung statt einer Fehlermeldung.
+   *
+   * ## Nur der Stop
+   *
+   * Groesse, Hebel und Take-Profits bleiben unberuehrt. Das Signal hat
+   * seine Marktmeinung beim Eroeffnen hinterlegt; sie mitten im Trade
+   * umzuschreiben waere eine andere Strategie.
+   */
+  private async verschiebeStop(
+    signal: TradeSignal,
+    args: { roherRumpf: string; herkunftsAdresse?: string },
+  ): Promise<SignalAufnahme> {
+    const neuerStop = signal.stop_loss_price;
+
+    // Das Schema laesst nichts anderes durch; hier steht es als
+    // zweite Schranke, falls dieser Weg je anders betreten wird.
+    if (neuerStop == null || neuerStop <= 0) {
+      return this.abgelehnt(signal, args, 'update ohne brauchbaren stop_loss_price');
+    }
+
+    // Zielplan: ausdrueckliche Kennung zuerst, sonst ueber die
+    // Signalherkunft. Das Symbol allein reicht nicht — siehe Schema.
+    const betroffene = signal.target_plan_id
+      ? [signal.target_plan_id]
+      : this.store.getBotTradePlans({ source: 'signal', symbol: signal.symbol })
+          .filter(z => ['active', 'monitoring', 'executing'].includes(z.status as string))
+          .filter(z => this.store.getSignalKennungZuPlan(z.id as string) === signal.signal_id)
+          .map(z => z.id as string);
+
+    const geaendert: string[] = [];
+    const abgelehnt: string[] = [];
+
+    for (const planId of betroffene) {
+      const ergebnis = await this.monitor.setzeStopLoss(planId, neuerStop, {
+        quelle: 'signal',
+        signalId: signal.signal_id,
+      });
+      if (ergebnis.geaendert) geaendert.push(planId);
+      else abgelehnt.push(`${planId}: ${ergebnis.grund}`);
+    }
+
+    const status = betroffene.length === 0 ? 'no_match' : 'accepted';
+
+    this.schreibeInsBuch({
+      signalId: signal.signal_id,
+      strategy: signal.strategy,
+      action: signal.action,
+      symbol: signal.symbol,
+      roherRumpf: args.roherRumpf,
+      status,
+      grund: betroffene.length === 0
+        ? 'Kein laufender Plan gefunden'
+        : (abgelehnt.length > 0 ? abgelehnt.join('; ') : null),
+      matchedPlanIds: betroffene,
+      herkunftsAdresse: args.herkunftsAdresse,
+    });
+    this.auth.merkeVor(signal.signal_id);
+
+    this.logger.info(
+      { signalId: signal.signal_id, neuerStop, geaendert, abgelehnt },
+      'Signal zum Verschieben des Stops umgesetzt',
+    );
+
+    return {
+      status,
+      httpStatus: 200,
+      message: betroffene.length === 0
+        ? 'Kein laufender Plan gefunden'
+        : `${geaendert.length} von ${betroffene.length} Plan/Plaenen auf Stop ${neuerStop} gesetzt`,
+      signalId: signal.signal_id,
+      matchedPlanIds: betroffene,
+    };
+  }
+
+  /** Kurzform fuer eine Ablehnung mit Buchung. */
+  private abgelehnt(
+    signal: TradeSignal,
+    args: { roherRumpf: string; herkunftsAdresse?: string },
+    grund: string,
+  ): SignalAufnahme {
+    this.schreibeInsBuch({
+      signalId: signal.signal_id,
+      strategy: signal.strategy,
+      action: signal.action,
+      symbol: signal.symbol,
+      roherRumpf: args.roherRumpf,
+      status: 'rejected_schema',
+      grund,
+      herkunftsAdresse: args.herkunftsAdresse,
+    });
+    return {
+      status: 'rejected_schema',
+      httpStatus: 400,
+      message: grund,
+      signalId: signal.signal_id,
+    };
+  }
+
+  // ============================================================
   // Abfragen fuer die Weboberflaeche
   // ============================================================
 
@@ -606,6 +741,81 @@ export class SignalService {
   // ============================================================
   // Intern
   // ============================================================
+
+  /**
+   * Wie weit stand der Markt von den Einstiegen entfernt?
+   *
+   * Die Frage, die ein Signal beurteilt, BEVOR es gehandelt wurde.
+   *
+   * Am 26.10. kam ein BTCUSDT-Short mit Einstiegen ab 80.659. Der
+   * Kurs stand bei 80.406 und war 13 Minuten zuvor noch bei 80.812
+   * gewesen — der Indikator hatte seine Staffel auf einen Kurs
+   * gerechnet, der beim Senden schon zurueck lag. Die Orders lagen
+   * innerhalb einer Sekunde im Orderbuch und wurden trotzdem nie
+   * gefuellt.
+   *
+   * Aus den Trades allein waere das nie aufgefallen: Der Plan steht
+   * als "nicht gehandelt" da, ohne Gewinn und ohne Verlust. Erst
+   * diese Zahl zeigt, woran es lag.
+   *
+   * Gemessen wird gegen den NAECHSTGELEGENEN Einstieg — er entscheidet,
+   * ob der Trade ueberhaupt zustande kommt.
+   */
+  private async marktlage(plan: TradePlan): Promise<{
+    kurs: number;
+    naechsterEinstieg: number;
+    abstand: number;
+    abstandPct: number;
+    /** Liegt der Kurs schon jenseits ALLER Einstiege? */
+    ausserhalb: boolean;
+    gemessenAm: string;
+  } | null> {
+    if (!this.kursGeber) return null;
+
+    const einstiege = (plan.entry_orders ?? [])
+      .map(e => Number(e.price))
+      .filter(p => Number.isFinite(p) && p > 0);
+    if (einstiege.length === 0) return null;
+
+    let kurs: number | null = null;
+    try {
+      kurs = await this.kursGeber(plan.symbol, plan.exchange ?? 'paper');
+    } catch {
+      // Ohne Kurs keine Aussage — aber auch kein Grund, das Signal
+      // abzulehnen. Gehandelt wird trotzdem.
+      return null;
+    }
+    if (kurs == null || !Number.isFinite(kurs) || kurs <= 0) return null;
+
+    // Der naechstgelegene Einstieg: An ihm entscheidet sich, ob der
+    // Trade ueberhaupt beginnt.
+    const naechster = einstiege.reduce((a, b) =>
+      Math.abs(b - kurs!) < Math.abs(a - kurs!) ? b : a);
+
+    // Vorzeichen so, dass POSITIV heisst: Der Kurs muss sich noch auf
+    // die Einstiege zubewegen.
+    //
+    // Beim Short liegen die Verkaufs-Limits ueber dem Markt, beim Long
+    // die Kauf-Limits darunter. "Noch 0,3 % entfernt" liest sich in
+    // beiden Faellen gleich.
+    const roh = plan.direction === 'short' ? naechster - kurs : kurs - naechster;
+    const abstandPct = (roh / kurs) * 100;
+
+    // Jenseits ALLER Einstiege: Der Kurs ist durch die ganze Staffel
+    // hindurch und kommt — ohne Umkehr — nicht mehr zurueck.
+    const ausserhalb = plan.direction === 'short'
+      ? kurs > Math.max(...einstiege)
+      : kurs < Math.min(...einstiege);
+
+    return {
+      kurs: runde(kurs, 8),
+      naechsterEinstieg: runde(naechster, 8),
+      abstand: runde(roh, 8),
+      abstandPct: runde(abstandPct, 4),
+      ausserhalb,
+      gemessenAm: new Date().toISOString(),
+    };
+  }
 
   private speicherePlan(plan: TradePlan, herkunft: unknown): void {
     this.store.upsertBotTradePlan({
@@ -707,4 +917,10 @@ export class SignalService {
       autoStart: this.config.autoStart,
     });
   }
+}
+
+/** Auf eine feste Stellenzahl — fuer Werte, die gespeichert werden. */
+function runde(wert: number, stellen: number): number {
+  const faktor = Math.pow(10, stellen);
+  return Math.round(wert * faktor) / faktor;
 }

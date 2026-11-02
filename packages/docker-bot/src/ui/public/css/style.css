@@ -601,3 +601,38 @@ tr:hover td { background: var(--bg-tertiary); }
   .main { padding: 16px; }
   .cards { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ============================================================
+   Aufflackern bei Datenaenderung
+   ============================================================
+
+   Die Seiten aktualisieren sich im Hintergrund. Ohne einen Hinweis
+   bemerkt niemand, dass sich eine Zahl bewegt hat — mit einem
+   dauerhaften Hinweis wiederum bliebe die halbe Tabelle eingefaerbt.
+   Deshalb ein kurzes Aufleuchten, das von selbst verschwindet.
+
+   Gruen fuer die gute, rot fuer die schlechte Richtung; grau, wo es
+   keine Richtung gibt (ein Status etwa aendert sich, ohne besser oder
+   schlechter zu werden). */
+
+@keyframes tc-flack-gruen {
+  from { background-color: rgba(34, 197, 94, 0.38); }
+  to   { background-color: transparent; }
+}
+@keyframes tc-flack-rot {
+  from { background-color: rgba(239, 68, 68, 0.38); }
+  to   { background-color: transparent; }
+}
+@keyframes tc-flack-neutral {
+  from { background-color: rgba(148, 163, 184, 0.28); }
+  to   { background-color: transparent; }
+}
+
+.tc-flack-gruen   { animation: tc-flack-gruen 1.4s ease-out; }
+.tc-flack-rot     { animation: tc-flack-rot 1.4s ease-out; }
+.tc-flack-neutral { animation: tc-flack-neutral 1.4s ease-out; }
+
+/* Wer Bewegung im Bild nicht vertraegt, bekommt sie nicht. */
+@media (prefers-reduced-motion: reduce) {
+  .tc-flack-gruen, .tc-flack-rot, .tc-flack-neutral { animation: none; }
+}

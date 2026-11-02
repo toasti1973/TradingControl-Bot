@@ -80,6 +80,82 @@ freie Margin) wirken **nur nach unten**. Einzige Ausnahme ist der
 
 Ausführlich: `docs/TRADINGVIEW-SIGNALE.md`.
 
+### 3aa. Alles liegt an der Börse, nichts nur im Bot
+
+Einstiege, Take-Profits und der Stop-Loss gehen als **echte Orders**
+ins Orderbuch — nicht erst, wenn der Kurs sie berührt.
+
+**Warum:** Der Bot beobachtete den Kurs im Zwei-Sekunden-Takt und
+schickte erst beim Überschreiten eine Market-Order. Das setzt dreierlei
+voraus: dass er läuft, Verbindung hat und im richtigen Augenblick
+hinsieht. Am 25.10.2026 lief HYPEUSDT in der Minute 13:17 auf 77,034
+und schloss bei 76,957 — Ziel 1 lag bei 76,9907 und wurde nie
+ausgelöst. Ein Docht zwischen zwei Abfragen. Am selben Tag standen zwei
+von vier Einstiegen Stunden nach dem Signal noch auf „nicht
+abgeschickt", obwohl der Kurs sie längst durchlaufen hatte.
+
+Eine Order im Orderbuch braucht nichts davon. Sie wird gefüllt, sobald
+der Kurs sie berührt — und zwar **zum Zielpreis**, nicht zu dem, was
+zwei Sekunden später noch übrig ist.
+
+| Was | Wann gelegt | Art |
+|-----|-------------|-----|
+| alle Einstiege | bei Signaleingang | `limit` |
+| alle Take-Profits | sobald eine Position steht | `limit`, `reduceOnly` |
+| Stop-Loss | sobald eine Position steht | `stop`, `reduceOnly` |
+
+Umgesetzt in `TradePlanMonitor`:
+
+- `processEntries()` platziert Limit-Einstiege **ohne** Preisprüfung.
+  Nur Einstiege mit Indikator-Trigger warten — die Börse kennt keinen
+  RSI. Eine Market-Order (`first_market_rest_limit`) braucht den Kurs.
+- `synchronisiereTpOrders()` legt alle offenen Ziele. **Die Preise
+  stehen fest, die Mengen nicht:** Sie folgen der tatsächlich
+  eingestiegenen Menge (`tpMengen()`). Mit jedem gefüllten Einstieg
+  wachsen sie — die alte Order wird zurückgenommen und größer neu
+  gelegt.
+- `synchronisiereSlOrder()` hinterlegt den Stop. Wandert er (nach einem
+  Take-Profit oder als Trailing), wird zurückgenommen und neu gelegt.
+  Ein kurzer Augenblick ohne Absicherung ist besser als gar keine.
+- **Scheitert das Zurücknehmen, wird NICHT neu gelegt.** Zwei
+  Stop-Orders schlössen zusammen mehr, als offen ist.
+- `naheBei()` vergleicht mit Toleranz. Ohne sie gälte jede Order bei
+  jedem Durchlauf als verändert und flöge im Takt der Kursabfrage hin
+  und her.
+- Beim Beenden nimmt `beendePlan()` alles zurück.
+
+Die Kursbeobachtung bleibt als **Rückfall**, falls sich keine Order
+legen ließ.
+
+Im Hedge-Modus trägt jede Order `positionSide`. `CcxtBroker.hedgeFeld()`
+übersetzt: Phemex `posSide: "Long"`, Bybit `positionIdx: 1`, Binance
+`positionSide: "LONG"`, OKX `posSide: "long"`. Eine Börse ohne
+hinterlegte Übersetzung bekommt nichts — lieber das als ein erfundenes
+Feld.
+
+Tests: `packages/docker-bot/src/services/trade-plan-orderbuch.test.ts`,
+`packages/core/src/broker/ccxt-hedge.test.ts`.
+
+### 3ab. Long und Short auf demselben Symbol sind zwei Geschäfte
+
+Das Übungskonto führt Positionen je **(Symbol, Richtung)**, wie Phemex
+im Hedge-Modus. Entscheidend ist nicht die Orderrichtung, sondern
+`reduceOnly`: Ein Kauf eröffnet einen Long **oder** schließt einen
+Short.
+
+**Warum:** Vorher gab es eine Position je Symbol. Am 25.10.2026 traf
+ein BTCUSDT-Long-Einstieg auf einen laufenden Short und schloss einen
+Teil davon — 0,65 USDT Verlust realisiert, ohne dass ein Stop gelaufen
+wäre. Beide Pläne handelten ein anderes Geschäft als das, das sie
+meinten.
+
+`PaperAccount.positionFortschreiben()` nimmt dafür den Parameter
+`schliesst`. Der Datenbankschlüssel ist `(symbol, seite)`;
+`migrierePaperPositionen()` stellt bestehende Datenbanken um.
+
+Tests: `packages/core/src/broker/paper-account.test.ts`, Abschnitt
+„Hedge-Modus".
+
 ### 3b. Nach dem ersten Take-Profit wird nicht mehr nachgekauft
 
 Sobald ein Take-Profit gegriffen hat, ist die Einstiegsphase vorbei:
@@ -113,6 +189,146 @@ Umgesetzt in `TradePlanMonitor`:
 
 Tests: `packages/docker-bot/src/services/trade-plan-monitor.test.ts`.
 
+### 3ac. Nach dem ersten Take-Profit kann ein Plan nicht mehr ins Minus
+
+Sobald ein Take-Profit greift, zieht der Bot den Stop auf den
+**tatsächlichen durchschnittlichen Einstiegspreis** — nicht auf den,
+den das Signal vorgibt, wenn der schlechter liegt.
+
+**Warum:** Ein Signal rechnet seinen Break-Even-Stop auf die
+**geplante** Einstiegsstaffel. Füllt davon nur ein Teil — und das ist
+der Regelfall, denn nach dem ersten Take-Profit werden die restlichen
+Einstiege zurückgenommen (Regel 3b) —, liegt der vorgegebene Stop
+unter dem echten Einstand.
+
+BNBUSDT am 26.10.2026:
+
+| | |
+|---|---|
+| geplante Einstiege | 739,96 / 738,39 / 736,83 / 735,26 |
+| Durchschnitt davon | **737,61** — darauf setzte das Signal den Stop |
+| tatsächlich gefüllt | nur 739,96 (der erste) |
+
+```
+TP1  (743,86 − 739,96) × 1,36399069  =  +5,32
+SL   (737,61 − 739,96) × 4,09197206  =  −9,62
+Gebühren                                −1,91
+                                       ──────
+                                        −6,21 USDT
+```
+
+25 % gingen mit Gewinn heraus, 75 % mit Verlust. Rechnerisch konnte
+dieser Trade nach TP1 gar nicht mehr positiv enden.
+
+Umgesetzt in `TradePlanMonitor.zieheStopAufEinstand()`, aufgerufen in
+`tpErreicht()` **nach** dem `sl_adjust` des Signals und **vor** dem
+Trailing. Die Reihenfolge ist Absicht: Das Signal setzt zuerst, die
+Schranke hebt nur an, was danebenliegt.
+
+**Die Schranke wirkt nur in die sichere Richtung** — beim Long nach
+oben, beim Short nach unten. Liegt der Stop des Signals bereits
+besser, bleibt er. Dieselbe Einbahn wie bei den Grenzen des
+Risikoprofils (Regel 3a).
+
+**Genau der Einstand, kein Aufschlag.** Die Gebühren bleiben außen
+vor: Der bereits realisierte Take-Profit deckt sie (beim BNB-Plan
+5,32 gegen 1,91 USDT). Ein Aufschlag rückte den Stop näher an den
+Kurs und löste ihn öfter aus.
+
+`updateTrailingStop()` darf den Schutz nicht unterlaufen: Auch die
+**erste** Trailing-Setzung prüft jetzt die Richtung. Vorher setzte sie
+`slCurrent` bedingungslos — ein nach einem Take-Profit auf den
+Einstand gezogener Stop wäre beim Anlaufen des Trailings
+stillschweigend wieder darunter gerutscht.
+
+Tests: `packages/docker-bot/src/services/stop-break-even.test.ts`.
+
+### 3ace. Sind alle Ziele erreicht, hält der Stop das letzte
+
+Die Signale ziehen den Stop stufenweise nach: TP2 setzt ihn auf TP1,
+TP3 auf TP2, TP4 auf TP3. Das lässt dem Trade bewusst Luft — eine
+Stufe Abstand, damit ein Rücksetzer ihn nicht sofort beendet.
+
+**Nach dem letzten Ziel kommt diese Stufe nicht mehr.** Es gibt kein
+TP5, das den Stop auf TP4 zöge; ab hier trägt allein das Trailing.
+Ist dessen Prozentsatz weiter als der Abstand zwischen den letzten
+beiden Zielen, bleibt bereits erreichter Gewinn unbesichert liegen.
+
+HYPEUSDT am 27.10.2026, alle vier Ziele erreicht:
+
+| | |
+|---|---|
+| TP4 gefüllt zu | 80,1464 |
+| Stop danach (= TP3) | 79,6404 |
+| Höchstkurs seither | 80,497 |
+| Trailing 1,5 % davon | **79,2895** — noch unter dem Stop |
+
+Das Trailing hätte erst ab einem Kurs von 80,853 überhaupt gegriffen.
+Bis dahin hingen 1,11 USDT bereits erreichter Gewinn in der Luft.
+
+`sichereErreichteZiele()` hebt den Stop auf das beste erreichte Ziel —
+nach dem tatsächlichen Füllpreis, nicht dem geplanten.
+
+**Nur nach dem letzten Ziel.** Nach jedem wäre es falsch: Dann stünde
+der Stop ständig eine Stufe zu eng, und die Luft, die das Signal dem
+Trade lässt, wäre weg.
+
+**Und nur mit Abstand zum Kurs.** Im Augenblick, in dem das letzte
+Ziel füllt, steht der Kurs genau auf dessen Preis. Ein Stop dort ist
+kein Stop, sondern ein Verkauf zu Markt — im Test löste er zweimal in
+derselben Sekunde aus und schloss mehr, als offen war. Die Grenze
+wartet deshalb, bis der Kurs `MINDESTABSTAND_ZIEL_PCT` (0,05 %)
+darüber steht.
+
+**Geprüft wird bei jedem Durchlauf, nicht nur beim Take-Profit.**
+Nach einem Neustart bringt der wiederhergestellte Zustand `slCurrent`
+mit, aber `tpErreicht()` läuft nie wieder. Und das Trailing darf die
+Grenze nicht unterlaufen — es rechnet nur Prozente vom Höchstkurs und
+weiß nichts von erreichten Zielen.
+
+Tests: `packages/docker-bot/src/services/stop-break-even.test.ts`,
+Abschnitt „Alle Ziele erreicht".
+
+### 3ad. TC-Synaptrix darf den Stop nachkorrigieren — nur enger
+
+Der Bot ist der **Sofortschutz**, nicht die letzte Instanz. Über den
+Rückkanal erfährt TC-Synaptrix den tatsächlichen Einstand und kann
+einen genaueren Stop nachreichen.
+
+Dafür gibt es zwei Ergänzungen:
+
+| Richtung | Was |
+|---|---|
+| Bot → Synaptrix | Jedes Ereignis, das die Position verändert, trägt `position` mit `einstand`, `eingestiegen`, `offen` und der Zahl der gefüllten Einstiegsstufen |
+| Synaptrix → Bot | Signal-Action `update` mit `stop_loss_price` und `target_plan_id` |
+
+**`update` verschiebt ausschließlich den Stop.** Größe, Hebel und
+Take-Profits bleiben unantastbar — sie mitten im Trade zu ändern hieße,
+eine andere Strategie zu handeln als die, für die er eröffnet wurde.
+Das Schema lässt gar nichts anderes durch (`leeresSignal`).
+
+**Angenommen wird nur, was das Risiko verkleinert.** `setzeStopLoss()`
+lehnt ab, was den Stop weiter wegrücken würde, und begründet es. Ohne
+diese Schranke ließe sich ein laufender Trade aus der Ferne riskanter
+machen, als er eröffnet wurde.
+
+Ein `update` ohne `stop_loss_price` oder ohne Zielangabe wird
+abgewiesen. Bei `close` ist „alles auf diesem Symbol" eindeutig; ein
+Stop-Preis ist es nicht — er gehört zu genau einer Position mit genau
+einem Einstand.
+
+**Warum trotzdem beides:** Zwischen dem Take-Profit und dem
+eintreffenden Update liegen Warteschlangentakt, Verarbeitung und
+Rückweg — rund 20 bis 40 Sekunden, in denen der alte Stop an der Börse
+hängt.
+
+Der Rückkanal meldet an TC-Synaptrix, **nicht** an das Journal.
+Regel 1 bleibt unberührt.
+
+Tests: `packages/signals/src/signal-update.test.ts`,
+`packages/docker-bot/src/services/stop-break-even.test.ts`,
+`packages/docker-bot/src/services/tc-rueckkanal-service.test.ts`.
+
 ### 3c. Ein Plan wird erst aufgeräumt, dann abgemeldet
 
 Wer einen Plan beendet, ruft `TradePlanMonitor.beendePlan()`. Die
@@ -144,6 +360,76 @@ mit voller Position und verkauft sie ein zweites Mal.
 
 Tests: `packages/docker-bot/src/services/trade-plan-beenden.test.ts`.
 
+### 3ca. Ein Storno räumt auf wie ein Beenden
+
+`processPlan` Schritt 0 behandelt einen Plan, dessen Status von außen
+auf `cancelled` gesetzt wurde — etwa durch ein `cancel`-Signal. Die
+Reihenfolge dort ist dieselbe wie in `beendePlan()` und aus demselben
+Grund zwingend:
+
+1. Offene Position zu Markt schließen
+2. Erst dann die Orders zurücknehmen
+
+**Warum:** Unter den offenen Orders ist der Stop-Loss. Wer ihn zuerst
+zurücknimmt und danach beim Schließen scheitert, hinterlässt eine
+ungesicherte Position.
+
+Hier stand nur `cancelAllOrdersForPlan()`. Am 01.11.2026 stornierte
+TC-Synaptrix 42 Pläne auf einmal; **acht** davon hatten eine offene
+Position. Alle acht blieben stehen, während ihre Stop-Orders
+zurückgenommen wurden. Die BNBUSDT-Position lief danach einen Tag
+lang ohne jede Absicherung.
+
+Scheitert das Schließen, bleiben die Orders **liegen** und der
+nächste Durchlauf versucht es erneut — lieber eine abgesicherte
+Position, die sich nicht beenden lässt, als eine ungesicherte.
+
+Tests: `packages/docker-bot/src/services/trade-plan-beenden.test.ts`.
+
+### 3cb. Der Hebel gehört an die Order, nicht in den Arbeitsspeicher
+
+`OrderParams.leverage` trägt den Hebel des Plans. Der Übungsbroker
+hält ihn an der Order fest, und `ordersWiederherstellen()` nimmt ihn
+nach einem Neustart wieder auf.
+
+**Warum:** Eine echte Börse führt den Hebel je Symbol und merkt ihn
+sich — `setLeverage()` genügt dort. Der Übungsbroker hielt ihn in
+einer Map im Arbeitsspeicher. Solange Einstiege als Market-Orders
+sofort nach dem Setzen hinausgingen, trug das.
+
+Seit die Einstiege als Limit-Orders im Orderbuch liegen (Regel 3aa),
+vergehen zwischen `setLeverage()` und der Füllung oft Stunden. Fällt
+ein Neustart dazwischen, ist die Map leer — und `?? 1` buchte die
+Füllung mit **Hebel 1**.
+
+Am 02.11.2026:
+
+| | |
+|---|---|
+| Kontostand | 8.309,58 USDT |
+| gebunden laut Anzeige | **10.606,21 USDT** — mehr als vorhanden |
+| frei | 0,00 USDT |
+
+```
+BNBUSDT buy   Hebel 1 statt 10   →  4.854,18 statt 485,42
+SOLUSDT buy   Hebel 1 statt 13   →  3.082,81 statt 237,14
+```
+
+**Die Folge war schwerer als eine falsche Anzeige.** Mit `frei = 0`
+fiel die Risikogrenze aus, die sich auf die verfügbare Margin stützt:
+Bei jedem Signal stand „Kein freier Betrag bekannt — die Grenze der
+verfügbaren Margin wurde übersprungen".
+
+`hebelFuer()` fragt in dieser Reihenfolge: die Order, dann die
+Symbol-Map, dann eine bestehende Position auf demselben Symbol (eine
+Position mit zwei Hebeln gibt es nicht). Bleibt alles leer, ist 1 die
+Notannahme — **aber keine stille**: Sie wird gemeldet.
+
+`getLiegendeOrders()` liefert `p.leverage` mit, damit der Hebel den
+Neustart übersteht.
+
+Tests: `packages/core/src/broker/paper-hebel.test.ts`.
+
 ### 3d. Was ein Plan einbrachte, rechnet der Bot nur zum Hinsehen
 
 `ErgebnisService` rechnet aus `bot_trade_plan_orders`: gefüllte
@@ -154,6 +440,16 @@ Diese Zahl ist nicht die Buchhaltung. Maßgeblich bleibt der API-Import
 des Journals direkt bei der Börse (Regel 1) — nur er kennt
 Teilfüllungen, Finanzierungskosten und den tatsächlichen
 Ausführungspreis. Die Oberfläche sagt das an Ort und Stelle dazu.
+
+**Vor jeder Auswertung der Übungsergebnisse:
+`docs/DATENVORBEHALTE-AUSWERTUNG.md` lesen.** Dort steht, welche
+Kennzahl in welchem Zeitraum durch inzwischen behobene Fehler
+verfälscht ist — allen voran die neun Zwangsschließungen vom
+02.11.2026, die wie Trades aussehen, aber keine sind. Die Daten
+wurden bewusst **nicht** nachträglich korrigiert: Eine
+stillschweigend geänderte Messreihe ist schlimmer als eine mit
+bekannten Lücken. Die Auswertungsseite blendet den Vorbehalt
+ebenfalls ein.
 
 Tests: `packages/docker-bot/src/services/ergebnis-service.test.ts`.
 

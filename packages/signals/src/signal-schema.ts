@@ -72,6 +72,29 @@ export class SignalSchema {
     // Bei allem ausser `open` reichen Kennung, Symbol und Zielangabe —
     // ein Trigger traegt keine Positionsdaten mit sich.
     if (action !== 'open') {
+      // `update` ist die Ausnahme: Es traegt genau eine Angabe, und
+      // ohne sie hat es keinen Inhalt. Ein Update ohne Stop-Preis
+      // wortlos durchzulassen hiesse, eine Absicht zu quittieren, die
+      // nichts bewirkt — der Absender hielte den Stop danach fuer
+      // verschoben.
+      let stopLoss: number | null = null;
+      if (action === 'update') {
+        stopLoss = this.leseZahl(raw, ['stop_loss_price', 'sl_price', 'stop_loss', 'sl']) ?? null;
+        if (stopLoss == null) {
+          errors.push('update ohne stop_loss_price — es gaebe nichts zu aendern');
+        } else if (stopLoss <= 0) {
+          errors.push(`stop_loss_price muss groesser als 0 sein, war ${stopLoss}`);
+        }
+        // Ohne Zielangabe traefe das Update jeden laufenden Plan auf
+        // diesem Symbol. Bei `close` ist das gewollt — "mach alles zu"
+        // ist eindeutig. Ein Stop-Preis ist es nicht: Er gehoert zu
+        // genau einer Position mit genau einem Einstand.
+        if (!this.leseText(raw, ['target_plan_id', 'plan_id']) &&
+            !this.leseText(raw, ['signal_id', 'id'])) {
+          errors.push('update ohne target_plan_id oder signal_id — unklar, welcher Plan gemeint ist');
+        }
+      }
+
       if (errors.length > 0) return { valid: false, signal: null, errors, warnings };
       return {
         valid: true,
@@ -86,6 +109,7 @@ export class SignalSchema {
           symbol,
           exchange: this.leseText(raw, ['exchange']) ?? this.defaultExchange,
           target_plan_id: this.leseText(raw, ['target_plan_id', 'plan_id']) ?? null,
+          stop_loss_price: stopLoss,
           tag: this.leseText(raw, ['tag']) ?? null,
           notes: this.leseText(raw, ['notes']) ?? null,
           extra: this.sammleUnbekannte(raw),
@@ -216,6 +240,8 @@ export class SignalSchema {
         return 'close';
       case 'cancel': case 'abort':
         return 'cancel';
+      case 'update': case 'modify': case 'adjust': case 'sl_update':
+        return 'update';
       default:
         errors.push(`Unbekannte action: "${wert}"`);
         return 'open';

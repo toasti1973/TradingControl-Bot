@@ -79,8 +79,19 @@ export interface KontoStand {
   verluste: number;
 }
 
+/**
+ * Schluessel einer Position im Hedge-Modus.
+ *
+ * Symbol UND Richtung: Long und Short auf demselben Symbol sind zwei
+ * Positionen, nicht eine. Nur das Symbol als Schluessel zu nehmen
+ * liess einen Long-Einstieg einen bestehenden Short anknabbern.
+ */
+function positionsSchluessel(symbol: string, seite: 'buy' | 'sell'): string {
+  return `${symbol}|${seite}`;
+}
+
 /** Offene Position, wie das Konto sie fuehrt. */
-interface OffenePosition {
+export interface OffenePosition {
   symbol: string;
   seite: 'buy' | 'sell';
   menge: number;
@@ -175,7 +186,7 @@ export class PaperAccount {
 
     this.positionen.clear();
     for (const p of stand.positionen ?? []) {
-      if (p.menge > 0) this.positionen.set(p.symbol, { ...p });
+      if (p.menge > 0) this.positionen.set(positionsSchluessel(p.symbol, p.seite), { ...p });
     }
   }
 
@@ -197,6 +208,16 @@ export class PaperAccount {
     /** Market-Orders zahlen den Taker-Satz, Limit-Orders den Maker-Satz. */
     orderArt: 'market' | 'limit' | 'stop' | 'stop_limit';
     hebel?: number;
+    /**
+     * Soll diese Order eine bestehende Position verkleinern?
+     *
+     * Entspricht `reduceOnly` der Boerse. Im Hedge-Modus ist das die
+     * einzige Angabe, aus der sich ablesen laesst, welche der beiden
+     * Positionen eines Symbols gemeint ist — die Richtung allein
+     * genuegt nicht: Ein Kauf eroeffnet einen Long ODER schliesst
+     * einen Short.
+     */
+    schliesst?: boolean;
   }): { gebuehr: number; realisiert: number; verworfen?: string } {
     const { symbol, seite, menge, preis } = args;
 
@@ -240,7 +261,9 @@ export class PaperAccount {
     // Beim Schliessen bucht `positionFortschreiben` selbst (Gewinn oder
     // Verlust); die Gebuehr danach schreibt den Stand ein zweites Mal
     // fort. Beide Male stimmt er.
-    const realisiert = this.positionFortschreiben(symbol, seite, menge, preis, args.hebel ?? 1);
+    const realisiert = this.positionFortschreiben(
+      symbol, seite, menge, preis, args.hebel ?? 1, args.schliesst === true,
+    );
 
     this.buche({
       art: 'gebuehr',
@@ -257,34 +280,70 @@ export class PaperAccount {
   /**
    * Schreibt die Position fort und gibt den dabei realisierten Betrag
    * zurueck.
+   *
+   * HEDGE-MODUS: Long und Short auf demselben Symbol werden getrennt
+   * gefuehrt — so, wie Phemex es im Hedge-Modus tut.
+   *
+   * Entscheidend ist nicht die Richtung der Order, sondern ob sie
+   * eroeffnen oder schliessen soll (`schliesst`, aus `reduceOnly`):
+   *
+   *   Kauf,  eroeffnend → vergroessert die Long-Position
+   *   Kauf,  schliessend → verkleinert die Short-Position
+   *   Verkauf, eroeffnend → vergroessert die Short-Position
+   *   Verkauf, schliessend → verkleinert die Long-Position
+   *
+   * Im frueheren Netting-Modus gab es nur eine Position je Symbol. Ein
+   * Long-Einstieg traf dann auf eine bestehende Short-Position und
+   * schloss sie teilweise — statt eine eigene zu eroeffnen. Genau das
+   * geschah am 25.10. mit BTCUSDT: Der Long-Plan realisierte 0,65 USDT
+   * Verlust auf dem Short-Plan, ohne dass ein Stop gelaufen waere.
+   * Beide Plaene handelten ein anderes Geschaeft als das, das sie
+   * meinten.
    */
   private positionFortschreiben(
     symbol: string, seite: 'buy' | 'sell', menge: number, preis: number, hebel: number,
+    schliesst: boolean,
   ): number {
-    const offen = this.positionen.get(symbol);
+    // Welche Position ist gemeint? Eine schliessende Order zielt auf
+    // die Gegenrichtung, eine eroeffnende auf die eigene.
+    const zielSeite: 'buy' | 'sell' = schliesst
+      ? (seite === 'buy' ? 'sell' : 'buy')
+      : seite;
 
-    if (!offen || offen.menge === 0) {
-      this.positionen.set(symbol, { symbol, seite, menge, einstiegspreis: preis, hebel });
+    const schluessel = positionsSchluessel(symbol, zielSeite);
+    const offen = this.positionen.get(schluessel);
+
+    if (!schliesst) {
+      if (!offen || offen.menge === 0) {
+        this.positionen.set(schluessel, { symbol, seite: zielSeite, menge, einstiegspreis: preis, hebel });
+      } else {
+        const gesamt = offen.menge + menge;
+        offen.einstiegspreis = (offen.einstiegspreis * offen.menge + preis * menge) / gesamt;
+        offen.menge = gesamt;
+        offen.hebel = hebel || offen.hebel;
+      }
       return 0;
     }
 
-    // Gleiche Richtung: Position vergroessern, Einstieg mitteln.
-    if (offen.seite === seite) {
-      const gesamt = offen.menge + menge;
-      offen.einstiegspreis = (offen.einstiegspreis * offen.menge + preis * menge) / gesamt;
-      offen.menge = gesamt;
-      offen.hebel = hebel || offen.hebel;
-      return 0;
-    }
+    // Schliessend, aber nichts da: Im Hedge-Modus wird daraus KEINE
+    // Gegenposition. Der Broker weist solche Orders ohnehin ab; kaeme
+    // eine durch, entstuende hier sonst ein Bestand aus dem Nichts.
+    if (!offen || offen.menge === 0) return 0;
 
-    // Gegenrichtung: Es wird geschlossen — hier entsteht das Ergebnis.
     const geschlossen = Math.min(menge, offen.menge);
     const richtung = offen.seite === 'buy' ? 1 : -1;
     const ergebnis = (preis - offen.einstiegspreis) * geschlossen * richtung;
 
     this.realisiert += ergebnis;
     this.trades++;
-    if (ergebnis >= 0) this.gewinne++; else this.verluste++;
+    // Eine Null-Runde ist kein Gewinn.
+    //
+    // Mit `>= 0` floss jeder Abschluss ohne Ergebnis in die
+    // Trefferquote ein und schoente sie. Bei einem Uebungskonto, das
+    // der Beurteilung eines Signalgebers dient, ist das die falsche
+    // Richtung zu irren.
+    if (ergebnis > 0) this.gewinne++;
+    else if (ergebnis < 0) this.verluste++;
 
     this.buche({
       art: ergebnis >= 0 ? 'gewinn' : 'verlust',
@@ -302,18 +361,16 @@ export class PaperAccount {
     // 0.12 abgezogen einen Rest von 1e-17. Ohne Toleranz bliebe eine
     // laengst geschlossene Position als Staubkorn stehen — mitsamt
     // ihrer gebundenen Margin, die dann nie wieder frei wuerde.
-    const rest = this.saeubere(menge - geschlossen);
     const verbleibend = this.saeubere(offen.menge - geschlossen);
 
-    if (rest > 0) {
-      // Durchgedreht: Die Gegenorder war groesser als die Position.
-      this.positionen.set(symbol, { symbol, seite, menge: rest, einstiegspreis: preis, hebel });
-    } else if (verbleibend <= 0) {
-      this.positionen.delete(symbol);
+    if (verbleibend <= 0) {
+      this.positionen.delete(schluessel);
     } else {
       offen.menge = verbleibend;
     }
 
+    // Was ueber die Position hinausging, verfaellt: Mehr schliessen
+    // als offen ist, ergibt im Hedge-Modus keine Gegenposition.
     return ergebnis;
   }
 
@@ -366,6 +423,31 @@ export class PaperAccount {
 
   offenePositionen(): Array<{ symbol: string; seite: string; menge: number; einstiegspreis: number; hebel: number }> {
     return [...this.positionen.values()].map(p => ({ ...p }));
+  }
+
+  /**
+   * Die offene Position zu einem Symbol, oder null.
+   *
+   * Hierauf stuetzt sich der PaperBroker, wenn er entscheidet, ob eine
+   * Nur-Schliessen-Order etwas zu schliessen hat. Er fuehrte frueher
+   * eine eigene zweite Liste — die ueberlebte keinen Neustart, weil nur
+   * dieses Konto gespeichert wird. Ein Take-Profit nach dem Hochfahren
+   * fand dort keine Position und wurde abgewiesen, obwohl eine offen
+   * war. Eine Tatsache, zwei Buecher: Das ging schief, wie es musste.
+   */
+  position(symbol: string, seite?: 'buy' | 'sell'): OffenePosition | null {
+    if (seite) {
+      const p = this.positionen.get(positionsSchluessel(symbol, seite));
+      return p && p.menge > 0 ? { ...p } : null;
+    }
+
+    // Ohne Richtung: die erste offene zu diesem Symbol. Nur fuer
+    // Aufrufer gedacht, denen die Richtung gleich ist — wer im
+    // Hedge-Modus die richtige Position braucht, nennt sie.
+    for (const p of this.positionen.values()) {
+      if (p.symbol === symbol && p.menge > 0) return { ...p };
+    }
+    return null;
   }
 
   /**

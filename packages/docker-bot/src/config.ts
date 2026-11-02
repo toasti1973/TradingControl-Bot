@@ -22,6 +22,21 @@ export interface BotConfig {
   defaultExchange: string;
   /** Zugangsdaten je Boerse, Schluessel wie im Boersen-Verzeichnis. */
   exchanges: Record<string, ExchangeCredentials>;
+  /**
+   * Rueckkanal an TC-Synaptrix: wohin Planereignisse gemeldet werden.
+   *
+   * Leer = der Kanal ist zu, der Bot meldet nichts und verhaelt sich wie
+   * bisher. **Gegenueber dem Journal aendert das nichts** — dorthin
+   * meldet der Bot weiterhin nicht zurueck, weil das Journal seine
+   * Buchhaltung ueber den Boersen-Import fuehrt und eine zweite Quelle
+   * genau den Abgleichkonflikt erzeugte, den es zu vermeiden gilt.
+   *
+   * Ganz oder gar nicht: Eine Adresse ohne Token kann sich nicht
+   * ausweisen und wuerde bei jedem Takt mit 401 abgewiesen — eine
+   * Einrichtung, die eingerichtet aussieht und nichts uebergibt.
+   */
+  tcRueckkanalUrl: string;
+  tcRueckkanalToken: string;
   webUiPassword: string;
   webPort: number;
   planPollInterval: number;
@@ -199,6 +214,8 @@ export function loadConfig(): BotConfig {
     tcApiKey: requiredEnv('TC_API_KEY', ''),
     defaultExchange,
     exchanges,
+    tcRueckkanalUrl: (process.env['TC_RUECKKANAL_URL'] ?? '').trim(),
+    tcRueckkanalToken: (process.env['TC_RUECKKANAL_TOKEN'] ?? '').trim(),
     webUiPassword: requiredEnv('WEB_UI_PASSWORD', 'admin'),
     webPort: parseInt(process.env['WEB_PORT'] ?? '3300', 10),
     planPollInterval: parseInt(process.env['PLAN_POLL_INTERVAL'] ?? '30000', 10),

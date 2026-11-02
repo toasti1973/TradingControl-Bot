@@ -145,7 +145,7 @@ function handleWSMessage(msg) {
 
 // ========== Routing ==========
 
-var allPages = ['dashboard', 'plans', 'planning', 'tradeplans', 'signale', 'trades', 'copytrading', 'settings', 'logs'];
+var allPages = ['dashboard', 'plans', 'planning', 'tradeplans', 'signale', 'trades', 'auswertung', 'copytrading', 'settings', 'logs'];
 
 function navigate(page) {
   allPages.forEach(function(p) {
@@ -167,17 +167,228 @@ function loadPage(page) {
     case 'copytrading': updateCopyTrading(); break;
     case 'tradeplans': updateTradePlans(); break;
     case 'signale': updateSignale(); break;
+    case 'auswertung': updateAuswertung(); break;
     case 'settings': updateSettings(); risikoprofilLaden(); uebungskontoLaden(); break;
     case 'logs': updateLogs(); break;
   }
 }
 
+// ============================================================
+// Selbsttaetiges Nachladen
+//
+// Alle zehn Sekunden holt die gerade sichtbare Seite ihre Daten neu.
+// Nachgezeichnet wird nur, was sich geaendert hat (tabelleZeichnen) —
+// ein vollstaendiges Ersetzen des Tabelleninhalts liesse die Seite im
+// Sekundentakt zucken und risse jede Textauswahl mit.
+//
+// Seiten, auf denen gerade etwas eingegeben wird, bleiben aussen vor:
+// Die Einstellungen und das Planformular wuerden sonst beim Tippen
+// unter den Haenden neu geladen.
+// ============================================================
+
+// Ueber Namen, nicht ueber Funktionsreferenzen: updateSignale steht in
+// signale.js und waere hier je nach Ladereihenfolge noch unbekannt.
+// loadPage() kennt die Zuordnung ohnehin.
+var AKTUALISIERENDE_SEITEN = [
+  'dashboard', 'plans', 'planning', 'tradeplans', 'signale', 'trades',
+  'auswertung',
+];
+
 function startAutoRefresh() {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   autoRefreshTimer = setInterval(function() {
+    // Ein unsichtbarer Reiter braucht keine Daten — und erzeugt sonst
+    // beim Zurueckkommen einen Schwall nachgeholter Abfragen.
+    if (document.hidden) return;
+
+    // Die Detailansicht zuerst: Wer sie offen hat, sieht auf sie und
+    // nicht auf die Liste dahinter.
+    if (typeof planDetailAktualisieren === 'function') {
+      try {
+        planDetailAktualisieren();
+      } catch (e) {
+        console.error('[refresh:detail]', e);
+      }
+    }
+
     var current = (window.location.hash || '#dashboard').slice(1);
-    if (current === 'dashboard') updateDashboard();
+    if (AKTUALISIERENDE_SEITEN.indexOf(current) < 0) return;
+
+    // Solange das Planformular offen ist, wird nicht unter den Haenden
+    // nachgeladen.
+    var formular = document.getElementById('plan-form-overlay');
+    if (current === 'planning' && formular && formular.style.display !== 'none') return;
+
+    try {
+      loadPage(current);
+    } catch (e) {
+      console.error('[refresh]', e);
+    }
   }, 10000);
+}
+
+// ============================================================
+// Flimmerfreies Nachzeichnen
+// ============================================================
+
+var FLACK_KLASSEN = ['tc-flack-gruen', 'tc-flack-rot', 'tc-flack-neutral'];
+
+/**
+ * Zeichnet eine Tabelle neu, ohne sie neu aufzubauen.
+ *
+ * Die Zeilen werden ueber ihren Schluessel wiedererkannt (data-plan
+ * oder data-key, sonst die Position). Eine wiedererkannte Zeile bleibt
+ * stehen; ersetzt wird nur der Inhalt der Zellen, die sich tatsaechlich
+ * geaendert haben. Genau diese Zellen leuchten kurz auf.
+ *
+ * Der Unterschied zu `tbody.innerHTML = html` ist fuer das Auge
+ * erheblich: Dort entsteht die Tabelle in jedem Durchgang neu, mit
+ * einem kurzen Leerzustand, verlorener Textauswahl und verlorenem
+ * Hover.
+ */
+function tabelleZeichnen(tbody, html) {
+  if (!tbody) return;
+
+  var werkbank = document.createElement('tbody');
+  werkbank.innerHTML = html;
+
+  // Beim ersten Mal gibt es nichts abzugleichen — und nichts, dessen
+  // Aenderung der Rede wert waere.
+  if (!tbody.children.length) {
+    tbody.innerHTML = html;
+    return;
+  }
+
+  var alteNachSchluessel = {};
+  for (var i = 0; i < tbody.children.length; i++) {
+    alteNachSchluessel[zeilenSchluessel(tbody.children[i], i)] = tbody.children[i];
+  }
+
+  var neueZeilen = Array.prototype.slice.call(werkbank.children);
+  var behalten = {};
+
+  neueZeilen.forEach(function (neu, index) {
+    var schluessel = zeilenSchluessel(neu, index);
+    var alt = alteNachSchluessel[schluessel];
+
+    if (alt) {
+      zeilenAbgleichen(alt, neu);
+      behalten[schluessel] = true;
+      // appendChild verschiebt den bestehenden Knoten an das Ende —
+      // damit stimmt am Schluss die Reihenfolge der neuen Liste.
+      tbody.appendChild(alt);
+    } else {
+      tbody.appendChild(neu);
+    }
+  });
+
+  // Was in der neuen Liste nicht mehr vorkommt, faellt weg.
+  Object.keys(alteNachSchluessel).forEach(function (schluessel) {
+    if (!behalten[schluessel]) {
+      var el = alteNachSchluessel[schluessel];
+      if (el.parentNode === tbody) tbody.removeChild(el);
+    }
+  });
+}
+
+function zeilenSchluessel(tr, index) {
+  return tr.getAttribute('data-plan') || tr.getAttribute('data-key') || ('#' + index);
+}
+
+function zeilenAbgleichen(alt, neu) {
+  // Unterschiedlich viele Zellen heisst: ein anderer Aufbau. Dann hilft
+  // kein Abgleich, dann muss die Zeile neu.
+  if (alt.children.length !== neu.children.length) {
+    alt.innerHTML = neu.innerHTML;
+    return;
+  }
+
+  if (alt.getAttribute('style') !== neu.getAttribute('style')) {
+    var stil = neu.getAttribute('style');
+    if (stil == null) alt.removeAttribute('style'); else alt.setAttribute('style', stil);
+  }
+
+  for (var i = 0; i < alt.children.length; i++) {
+    var a = alt.children[i];
+    var b = neu.children[i];
+    if (a.innerHTML === b.innerHTML) continue;
+
+    var vorher = zahlAus(a.textContent);
+    var nachher = zahlAus(b.textContent);
+    a.innerHTML = b.innerHTML;
+    aufflackern(a, vorher, nachher, a.getAttribute('data-flack') || b.getAttribute('data-flack'));
+  }
+}
+
+/**
+ * Laesst ein Element kurz aufleuchten.
+ *
+ * Die Farbe richtet sich nach der Richtung der Zahl. `art="invers"`
+ * dreht sie um — bei einem Short ist ein fallender Kurs die gute
+ * Nachricht. `art="neutral"` verzichtet auf die Wertung: Eine
+ * gestiegene gebundene Margin ist weder gut noch schlecht.
+ */
+function aufflackern(el, vorher, nachher, art) {
+  var klasse = 'tc-flack-neutral';
+
+  if (art !== 'neutral' && vorher != null && nachher != null && vorher !== nachher) {
+    var besser = nachher > vorher;
+    if (art === 'invers') besser = !besser;
+    klasse = besser ? 'tc-flack-gruen' : 'tc-flack-rot';
+  }
+
+  FLACK_KLASSEN.forEach(function (k) { el.classList.remove(k); });
+  // Erzwingt einen Umbruch, damit die Animation auch dann neu
+  // anlaeuft, wenn dieselbe Klasse gleich wieder gesetzt wird.
+  void el.offsetWidth;
+  el.classList.add(klasse);
+
+  setTimeout(function () { el.classList.remove(klasse); }, 1500);
+}
+
+/**
+ * Die Zahl in einem Text — gleich welcher Schreibweise.
+ *
+ * "+8,07 USDT" ergibt 8.07, "1.030,59" ergibt 1030.59, "75.57" ergibt
+ * 75.57. Entscheidend ist das Komma: Steht eines da, ist es der
+ * Dezimaltrenner und Punkte sind Tausenderpunkte. Fehlt es, stammt die
+ * Zahl aus einem toFixed und der Punkt trennt die Nachkommastellen.
+ */
+function zahlAus(text) {
+  if (text == null) return null;
+  var s = String(text).replace(/ /g, ' ');
+  var treffer = s.match(/[-+]?\d[\d.,]*/);
+  if (!treffer) return null;
+
+  var roh = treffer[0];
+  if (roh.indexOf(',') >= 0) {
+    roh = roh.replace(/\./g, '').replace(',', '.');
+  }
+  var n = parseFloat(roh);
+  return isFinite(n) ? n : null;
+}
+
+/**
+ * Setzt einen Text und laesst ihn bei Aenderung aufleuchten.
+ *
+ * Fuer die Kennzahl-Kacheln: Sie stehen gross auf der Seite, und wer
+ * nicht gerade hinsieht, bemerkte ihre Aenderung sonst nicht.
+ */
+function setTextLive(id, text, art) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var alt = el.textContent;
+  if (alt === text) return;
+
+  var vorher = zahlAus(alt);
+  var nachher = zahlAus(text);
+  el.textContent = text;
+
+  // Beim ersten Befuellen ist noch nichts geschehen, was aufleuchten
+  // muesste.
+  if (alt !== '' && alt !== '-' && alt !== '0') {
+    aufflackern(el, vorher, nachher, art);
+  }
 }
 
 // ========== Dashboard ==========
@@ -192,24 +403,35 @@ async function updateDashboard() {
   setText('stat-status', data.status);
   setStatusBadge('stat-status', data.status);
   setText('stat-broker', data.broker);
-  setText('stat-plans', data.activePlans);
-  setText('stat-trades', data.totalTrades);
+  setTextLive('stat-plans', String(data.activePlans), 'neutral');
+  setTextLive('stat-trades', String(data.totalTrades), 'neutral');
   setText('stat-uptime', formatUptime(data.uptime));
 
   // KPIs
   if (data.kpi) {
-    setText('kpi-margin', data.kpi.margin.toFixed(2) + ' USDT');
+    // Die gebundene Margin steigt und faellt mit dem Einstieg — das ist
+    // keine gute und keine schlechte Nachricht, nur eine Tatsache.
+    setTextLive('kpi-margin', data.kpi.margin.toFixed(2) + ' USDT', 'neutral');
+
     var pnl = data.kpi.realizedPnl;
-    var pnlEl = document.getElementById('kpi-pnl');
-    pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDT';
-    pnlEl.style.color = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : '';
-    var roiEl = document.getElementById('kpi-roi');
-    roiEl.textContent = (data.kpi.roi >= 0 ? '+' : '') + data.kpi.roi.toFixed(2) + '%';
-    roiEl.style.color = data.kpi.roi > 0 ? 'var(--green)' : data.kpi.roi < 0 ? 'var(--red)' : '';
+    setTextLive('kpi-pnl', (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDT');
+    document.getElementById('kpi-pnl').style.color =
+      pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : '';
+
+    setTextLive('kpi-roi', (data.kpi.roi >= 0 ? '+' : '') + data.kpi.roi.toFixed(2) + '%');
+    // Wozu die Prozentzahl ins Verhaeltnis gesetzt ist. Ohne diese
+    // Angabe laesst sich eine Rendite nicht einordnen — und die Zahl
+    // bezog sich frueher auf die gerade gebundene Margin, was bei fast
+    // geschlossenen Positionen absurde Werte ergab.
+    setText('kpi-roi-basis', data.kpi.roiBasis
+      ? 'bezogen auf ' + data.kpi.roiBasis.toFixed(2) + ' USDT' : '');
+    document.getElementById('kpi-roi').style.color =
+      data.kpi.roi > 0 ? 'var(--green)' : data.kpi.roi < 0 ? 'var(--red)' : '';
+
     var upnl = data.kpi.unrealizedPnl;
-    var upnlEl = document.getElementById('kpi-upnl');
-    upnlEl.textContent = (upnl >= 0 ? '+' : '') + upnl.toFixed(2) + ' USDT';
-    upnlEl.style.color = upnl > 0 ? 'var(--green)' : upnl < 0 ? 'var(--red)' : '';
+    setTextLive('kpi-upnl', (upnl >= 0 ? '+' : '') + upnl.toFixed(2) + ' USDT');
+    document.getElementById('kpi-upnl').style.color =
+      upnl > 0 ? 'var(--green)' : upnl < 0 ? 'var(--red)' : '';
   }
 
   if (data.lastError) {
@@ -222,11 +444,15 @@ async function updateDashboard() {
   var tbody = document.getElementById('active-plans-body');
   if (tbody) {
     if (data.plans.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty-state">Keine aktiven Plaene</td></tr>';
+      tabelleZeichnen(tbody, '<tr data-key="leer"><td colspan="13" class="empty-state">Keine aktiven Plaene</td></tr>');
     } else {
-      tbody.innerHTML = data.plans.map(function(p) {
+      tabelleZeichnen(tbody, data.plans.map(function(p) {
+        // Bei einem Short ist der fallende Kurs die gute Nachricht —
+        // das Aufleuchten muss sich danach richten, sonst leuchtet
+        // ausgerechnet der Gewinn rot.
+        var kursFlack = p.direction === 'short' ? ' data-flack="invers"' : '';
         var srcBadge = quellAbzeichen(p.source);
-        var size = p.total_size != null ? p.total_size : '-';
+        var size = groesseZelle(p);
         var start = p.created_at ? new Date(p.created_at).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-';
 
         // Nur Vollplaene haben eine Detailansicht — die Engine- und
@@ -235,26 +461,30 @@ async function updateDashboard() {
         var vollplan = p.source === 'tc' || p.source === 'local' || p.source === 'signal';
         vollplan = vollplan && p.ergebnis != null;
 
-        return '<tr' + (vollplan
+        return '<tr data-key="' + esc(p.id) + '"' + (vollplan
             ? ' style="cursor:pointer" title="Einzelheiten anzeigen"'
               + ' data-plan="' + esc(p.id) + '"'
               + ' onclick="planDetailOeffnen(this.dataset.plan)"'
             : '') + '>' +
           '<td><strong>' + esc(p.symbol) + '</strong></td>' +
           '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
-          '<td>' + size + '</td>' +
+          '<td data-flack="neutral">' + size + '</td>' +
+          '<td>' + einstiegZelle(p) + '</td>' +
           '<td>' + fortschritt(p.id) + aufsichtHinweis(p) + '</td>' +
-          '<td>' + slAnzeige(p.id, p.stop_loss_price) + '</td>' +
-          '<td>' + kursAnzeige(p.id) + '</td>' +
+          '<td' + kursFlack + '>' + slAnzeige(p.id, p.stop_loss_price) + '</td>' +
+          '<td' + kursFlack + '>' + kursAnzeige(p.id) + '</td>' +
           '<td>' + ergebnisZelle(p) + '</td>' +
-          '<td><span class="badge badge-default">' + esc(p.status) + '</span></td>' +
-          '<td>' + srcBadge + '</td>' +
-          '<td>' + start + '</td>' +
-          '<td>' + beendenKnopf(p, vollplan) + '</td>' +
+          '<td>' + renditeZelle(p) + '</td>' +
+          '<td data-flack="neutral"><span class="badge badge-default">' + esc(p.status) + '</span></td>' +
+          '<td data-flack="neutral">' + srcBadge + '</td>' +
+          '<td data-flack="neutral">' + start + '</td>' +
+          '<td data-flack="neutral">' + beendenKnopf(p, vollplan) + '</td>' +
           '</tr>';
-      }).join('');
+      }).join(''));
     }
   }
+
+  dashboardBeendetZeichnen(data.beendet || [], data.beendetGesamt || 0);
 
   var startBtn = document.getElementById('btn-start');
   var stopBtn = document.getElementById('btn-stop');
@@ -267,9 +497,23 @@ async function updateDashboard() {
   var riskCard = document.getElementById('risk-card');
   if (data.risk && riskCard) {
     riskCard.style.display = 'block';
-    setText('risk-daily', data.risk.dailyLossPct + '%');
-    setText('risk-weekly', data.risk.weeklyLossPct + '%');
-    setText('risk-drawdown', data.risk.drawdownPct + '%');
+
+    // Ein steigender Verlust ist die schlechte Richtung — deshalb
+    // invers: groessere Zahl, rotes Aufleuchten.
+    setTextLive('risk-daily', data.risk.dailyLossPct + '%', 'invers');
+    setTextLive('risk-weekly', data.risk.weeklyLossPct + '%', 'invers');
+    setTextLive('risk-drawdown', data.risk.drawdownPct + '%', 'invers');
+
+    // Worauf sich die Prozente beziehen — ohne diese Angabe sagt
+    // "0,9 %" wenig.
+    var bezug = document.getElementById('risk-bezug');
+    if (bezug && data.risk.kapital) {
+      var heute = data.risk.realisiertHeute;
+      bezug.textContent = 'bezogen auf ' + Number(data.risk.kapital).toLocaleString('de-DE',
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT' +
+        (heute != null ? ' · heute realisiert ' + (heute >= 0 ? '+' : '') +
+          Number(heute).toFixed(2) + ' USDT' : '');
+    }
 
     var badge = document.getElementById('risk-badge');
     if (data.risk.halted) {
@@ -347,6 +591,103 @@ async function updateDashboard() {
   });
 }
 
+/**
+ * Die erledigten Plaene, unter den aktiven und von ihnen getrennt.
+ *
+ * Getrennt, weil beides verschiedene Fragen beantwortet: Oben steht,
+ * was Aufsicht braucht, unten, wie es ausging. Gemischt verliert die
+ * obere Liste ihren Zweck — ein Dutzend abgeschlossener Trades
+ * verdeckt den einen, bei dem der Stop gleich greift.
+ */
+function dashboardBeendetZeichnen(beendet, gesamt) {
+  var block = document.getElementById('dash-beendet-block');
+  var body = document.getElementById('dash-beendet-body');
+  if (!block || !body) return;
+
+  if (!beendet.length) {
+    block.style.display = 'none';
+    body.innerHTML = '';
+    return;
+  }
+  block.style.display = 'block';
+
+  var zahl = document.getElementById('dash-beendet-zahl');
+  if (zahl) {
+    // Die Liste ist gekuerzt, die Zahl ist es nicht — sonst sieht ein
+    // Konto mit 80 abgeschlossenen Trades aus wie eines mit 25.
+    zahl.textContent = beendet.length < gesamt
+      ? beendet.length + ' von ' + gesamt
+      : String(gesamt);
+  }
+
+  tabelleZeichnen(body, beendet.map(function(p) {
+    var beendetAm = p.updated_at
+      ? new Date(p.updated_at).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+      : '-';
+
+    return '<tr style="cursor:pointer" title="Einzelheiten anzeigen"' +
+      ' data-plan="' + esc(p.id) + '"' +
+      ' onclick="planDetailOeffnen(this.dataset.plan)">' +
+      '<td><strong>' + esc(p.symbol) + '</strong></td>' +
+      '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
+      '<td>' + groesseZelle(p) + '</td>' +
+      '<td>' + einstiegZelle(p) + '</td>' +
+      '<td>' + ausgangZelle(p) + '</td>' +
+      '<td>' + ergebnisZelle(p) + '</td>' +
+      '<td>' + renditeZelle(p) + '</td>' +
+      '<td data-flack="neutral"><span class="badge badge-default">' + esc(p.status) + '</span></td>' +
+      '<td data-flack="neutral">' + quellAbzeichen(p.source) + '</td>' +
+      '<td data-flack="neutral">' + beendetAm + '</td>' +
+      '</tr>';
+  }).join(''));
+}
+
+/**
+ * Wie ein Plan ausging — in einem Wort.
+ *
+ * Der Status allein sagt es nicht: 'completed' steht sowohl ueber dem
+ * Trade, der alle Take-Profits mitnahm, als auch ueber dem, den der
+ * Stop erwischte.
+ */
+function ausgangZelle(p) {
+  var e = p.ergebnis;
+  if (!e || !e.eingestiegen) {
+    return '<span style="color:var(--text-muted)" title="Es wurde nie eingestiegen">nicht gehandelt</span>';
+  }
+
+  // Erst gefragt, ob ueberhaupt etwas geschlossen wurde.
+  //
+  // `realisiert` enthaelt auch die Gebuehren. Ein Plan, der nur
+  // einstieg und dann abgebrochen wurde, hat dadurch ein Minus — und
+  // galt hier als "im Verlust", obwohl nie eine Position geschlossen
+  // wurde. Das verzerrt die Beurteilung des Signalgebers: Der Trade
+  // ging nicht schlecht aus, er ging gar nicht aus.
+  if (!e.geschlossen) {
+    return '<span style="color:var(--text-muted)" ' +
+      'title="Eingestiegen, aber nie geschlossen — nur Gebuehren gebucht">' +
+      'ohne Abschluss</span>';
+  }
+
+  if (e.realisiert > 0) {
+    return '<span style="color:var(--green)">im Gewinn</span>';
+  }
+  if (e.realisiert < 0) {
+    return '<span style="color:var(--red)">im Verlust</span>';
+  }
+  return '<span style="color:var(--text-muted)">ohne Ergebnis</span>';
+}
+
+/**
+ * Gilt ein Plan als erledigt?
+ *
+ * Gleiche Einteilung wie im Dashboard-Dienst (dashboard.ts): 'error'
+ * zaehlt dazu, denn der Plan handelt nicht mehr — auch wenn er nicht
+ * planmaessig endete.
+ */
+function istBeendeterStatus(status) {
+  return status === 'completed' || status === 'cancelled' || status === 'error';
+}
+
 async function startBot() {
   await apiFetch('/bot/start', { method: 'POST' });
   updateDashboard();
@@ -367,34 +708,56 @@ async function updatePlans() {
   var tbody = document.getElementById('plans-body');
   if (!tbody) return;
 
-  if (data.plans.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">Keine Plaene vorhanden</td></tr>';
-    return;
+  // Erledigte gehoeren nach unten, nicht zwischen die laufenden.
+  var aktiv = data.plans.filter(function(p) { return !istBeendeterStatus(p.status); });
+  var beendet = data.plans.filter(function(p) { return istBeendeterStatus(p.status); });
+
+  tabelleZeichnen(tbody, aktiv.length
+    ? aktiv.map(planZeile).join('')
+    : '<tr data-key="leer"><td colspan="12" class="empty-state">Keine aktiven Plaene</td></tr>');
+
+  var block = document.getElementById('plans-beendet-block');
+  var beendetBody = document.getElementById('plans-beendet-body');
+  if (block && beendetBody) {
+    block.style.display = beendet.length ? 'block' : 'none';
+    tabelleZeichnen(beendetBody, beendet.map(planZeile).join(''));
+    var zahl = document.getElementById('plans-beendet-zahl');
+    if (zahl) zahl.textContent = String(beendet.length);
   }
+}
 
-  tbody.innerHTML = data.plans.map(function(p) {
-    var srcBadge = quellAbzeichen(p.source);
-    // Nur Vollplaene tragen eine Ergebnisrechnung und damit eine
-    // Detailansicht unter /trade-plans/:id.
-    var vollplan = p.ergebnis != null;
+function planZeile(p) {
+  var srcBadge = quellAbzeichen(p.source);
+  // Nur Vollplaene tragen eine Ergebnisrechnung und damit eine
+  // Detailansicht unter /trade-plans/:id.
+  var vollplan = p.ergebnis != null;
 
-    return '<tr' + (vollplan
-        ? ' style="cursor:pointer" title="Einzelheiten anzeigen"'
-          + ' data-plan="' + esc(p.id) + '"'
-          + ' onclick="planDetailOeffnen(this.dataset.plan)"'
-        : '') + '>' +
-      '<td><strong>' + esc(p.symbol) + '</strong></td>' +
-      '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
-      '<td>' + esc(p.market_type) + '</td>' +
-      '<td>' + p.leverage + 'x</td>' +
-      '<td><span class="badge badge-default">' + esc(p.status) + '</span>' + aufsichtHinweis(p) + '</td>' +
-      '<td>' + (p.bot_enabled ? '<span class="dot dot-green"></span>' : '<span class="dot dot-red"></span>') + '</td>' +
-      '<td>' + ergebnisZelle(p) + '</td>' +
-      '<td>' + srcBadge + '</td>' +
-      '<td>' + new Date(p.created_at).toLocaleDateString('de-DE') + '</td>' +
-      '<td>' + beendenKnopf(p, vollplan) + '</td>' +
-      '</tr>';
-  }).join('');
+  // Die Uebersicht liefert die Zahl der geplanten Einstiege unter
+  // `entry_orders` — einstiegZelle() erwartet sie unter
+  // `entries_geplant` wie im Dashboard.
+  var fuerZelle = {
+    ergebnis: p.ergebnis,
+    entries_geplant: typeof p.entry_orders === 'number' ? p.entry_orders : null,
+  };
+
+  return '<tr data-key="' + esc(p.id) + '"' + (vollplan
+      ? ' style="cursor:pointer" title="Einzelheiten anzeigen"'
+        + ' data-plan="' + esc(p.id) + '"'
+        + ' onclick="planDetailOeffnen(this.dataset.plan)"'
+      : '') + '>' +
+    '<td><strong>' + esc(p.symbol) + '</strong></td>' +
+    '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
+    '<td data-flack="neutral">' + esc(p.market_type) + '</td>' +
+    '<td data-flack="neutral">' + p.leverage + 'x</td>' +
+    '<td>' + einstiegZelle(fuerZelle) + '</td>' +
+    '<td data-flack="neutral"><span class="badge badge-default">' + esc(p.status) + '</span>' + aufsichtHinweis(p) + '</td>' +
+    '<td data-flack="neutral">' + (p.bot_enabled ? '<span class="dot dot-green"></span>' : '<span class="dot dot-red"></span>') + '</td>' +
+    '<td>' + ergebnisZelle(p) + '</td>' +
+    '<td>' + renditeZelle(p) + '</td>' +
+    '<td data-flack="neutral">' + srcBadge + '</td>' +
+    '<td data-flack="neutral">' + new Date(p.created_at).toLocaleDateString('de-DE') + '</td>' +
+    '<td data-flack="neutral">' + beendenKnopf(p, vollplan) + '</td>' +
+    '</tr>';
 }
 
 // ========== Trades ==========
@@ -407,25 +770,57 @@ async function updateTrades() {
   if (!tbody) return;
 
   if (data.trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Keine Trades vorhanden</td></tr>';
+    tabelleZeichnen(tbody, '<tr data-key="leer"><td colspan="11" class="empty-state">Keine Trades vorhanden</td></tr>');
     return;
   }
 
-  tbody.innerHTML = data.trades.map(function(t) {
-    var pnl = t.pnl || 0;
-    var pnlColor = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text-muted)';
-    var roi = (t.avg_fill_price && t.filled_quantity) ? ((pnl / (t.avg_fill_price * t.filled_quantity)) * 100) : 0;
-    return '<tr>' +
-      '<td>' + new Date(t.timestamp).toLocaleString('de-DE') + '</td>' +
-      '<td><strong>' + esc(t.symbol || '-') + '</strong></td>' +
-      '<td><span class="badge ' + (t.side === 'entry' ? 'badge-green' : 'badge-red') + '">' + esc(t.action) + '</span></td>' +
-      '<td>' + t.filled_quantity + '</td>' +
-      '<td>' + (t.avg_fill_price ? t.avg_fill_price.toFixed(2) : '-') + '</td>' +
-      '<td style="color:' + pnlColor + '">' + (pnl !== 0 ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) : '-') + '</td>' +
-      '<td style="color:' + pnlColor + '">' + (roi !== 0 ? (roi > 0 ? '+' : '') + roi.toFixed(2) + '%' : '-') + '</td>' +
-      '<td>' + esc(t.plan_id.slice(0, 8)) + '...</td>' +
-      '</tr>';
-  }).join('');
+  tabelleZeichnen(tbody, data.trades.map(tradeZeile).join(''));
+}
+
+/**
+ * Eine Zeile der Trade-Historie.
+ *
+ * PnL und ROI kommen vom Server, nicht aus einer Rechnung hier: Er
+ * kennt den Durchschnittseinstieg des Plans und die Richtung. Eine
+ * Oberflaeche, die das selbst schaetzt, weicht frueher oder spaeter
+ * von der Ergebnisrechnung ab — und dann stimmt keine der beiden
+ * Zahlen mehr.
+ */
+function tradeZeile(t) {
+  var pnl = Number(t.pnl) || 0;
+  var farbe = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--text-muted)';
+  var istEinstieg = t.role === 'entry' || t.side === 'entry';
+
+  var schluessel = t.id != null ? String(t.id) : (String(t.plan_id) + '-' + String(t.timestamp));
+  var plan = t.plan_id ? String(t.plan_id) : '';
+
+  return '<tr data-key="' + esc(schluessel) + '"' +
+    (plan ? ' style="cursor:pointer" title="Plan anzeigen" data-plan="' + esc(plan) +
+      '" onclick="planDetailOeffnen(this.dataset.plan)"' : '') + '>' +
+    '<td style="white-space:nowrap;font-size:11px;color:var(--text-muted)">' +
+      esc(zeitKurz(t.timestamp)) + '</td>' +
+    '<td><strong>' + esc(t.symbol || '-') + '</strong></td>' +
+    '<td>' + (t.direction
+      ? '<span class="badge ' + (t.direction === 'long' ? 'badge-green' : 'badge-red') + '">' +
+        esc(t.direction) + '</span>'
+      : '<span style="color:var(--text-muted)">–</span>') + '</td>' +
+    '<td><span class="badge ' + (istEinstieg ? 'badge-blue' :
+      (t.role === 'take_profit' ? 'badge-green' : 'badge-red')) + '">' +
+      esc(t.action || '-') + '</span></td>' +
+    '<td style="text-align:right">' + mengeKurz(t.filled_quantity) + '</td>' +
+    '<td style="text-align:right">' + preis(t.avg_fill_price) + '</td>' +
+    '<td style="text-align:right">' + (t.entry_price != null
+      ? preis(t.entry_price) : '<span style="color:var(--text-muted)">–</span>') + '</td>' +
+    '<td style="text-align:right;color:var(--text-muted)">' +
+      (t.fees ? geld(t.fees) : '–') + '</td>' +
+    '<td style="text-align:right;color:' + farbe + ';font-weight:600">' +
+      (pnl !== 0 ? (pnl > 0 ? '+' : '') + geld(pnl) : '–') + '</td>' +
+    '<td style="text-align:right;color:' + farbe + '">' +
+      (t.roi != null && t.roi !== 0
+        ? (t.roi > 0 ? '+' : '') + Number(t.roi).toFixed(2) + ' %'
+        : '<span style="color:var(--text-muted)">–</span>') + '</td>' +
+    '<td>' + quellAbzeichen(t.source || t.quelle) + '</td>' +
+    '</tr>';
 }
 
 // ========== Settings ==========
@@ -1226,30 +1621,41 @@ async function updateLocalPlans() {
   var tbody = document.getElementById('local-plans-body');
   if (!tbody) return;
 
-  if (data.plans.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">Keine lokalen Plaene vorhanden</td></tr>';
-    return;
-  }
+  var aktiv = data.plans.filter(function(p) { return !istBeendeterStatus(p.status); });
+  var beendet = data.plans.filter(function(p) { return istBeendeterStatus(p.status); });
 
-  tbody.innerHTML = data.plans.map(function(p) {
-    var slText = p.stop_loss_price ? (p.stop_loss_type === 'trailing' ? 'TS ' + (p.trailing_stop_pct || '-') + '%' : p.stop_loss_price.toFixed(2)) : '-';
-    var statusClass = p.status === 'planned' ? 'badge-yellow' : p.status === 'active' ? 'badge-green' : p.status === 'cancelled' ? 'badge-default' : 'badge-default';
-    return '<tr>' +
-      '<td><strong>' + esc(p.symbol) + '</strong></td>' +
-      '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
-      '<td>' + esc(p.market_type) + '</td>' +
-      '<td>' + p.leverage + 'x</td>' +
-      '<td>' + p.total_size + '</td>' +
-      '<td>' + p.entry_orders.length + '</td>' +
-      '<td>' + p.take_profits.length + '</td>' +
-      '<td>' + slText + '</td>' +
-      '<td><span class="badge ' + statusClass + '">' + esc(p.status) + '</span></td>' +
-      '<td>' +
-        (p.status === 'planned' || p.status === 'active' ? '<button class="btn btn-danger" style="font-size:11px;padding:2px 8px;" onclick="cancelLocalPlan(\'' + esc(p.id) + '\')">Abbrechen</button> ' : '') +
-        (p.status === 'cancelled' ? '<button class="btn" style="font-size:11px;padding:2px 8px;" onclick="deleteLocalPlan(\'' + esc(p.id) + '\')">Loeschen</button>' : '') +
-      '</td>' +
-      '</tr>';
-  }).join('');
+  tabelleZeichnen(tbody, aktiv.length
+    ? aktiv.map(lokaleZeile).join('')
+    : '<tr data-key="leer"><td colspan="10" class="empty-state">Keine aktiven lokalen Plaene</td></tr>');
+
+  var block = document.getElementById('local-beendet-block');
+  var beendetBody = document.getElementById('local-beendet-body');
+  if (block && beendetBody) {
+    block.style.display = beendet.length ? 'block' : 'none';
+    tabelleZeichnen(beendetBody, beendet.map(lokaleZeile).join(''));
+    var zahl = document.getElementById('local-beendet-zahl');
+    if (zahl) zahl.textContent = String(beendet.length);
+  }
+}
+
+function lokaleZeile(p) {
+  var slText = p.stop_loss_price ? (p.stop_loss_type === 'trailing' ? 'TS ' + (p.trailing_stop_pct || '-') + '%' : p.stop_loss_price.toFixed(2)) : '-';
+  var statusClass = p.status === 'planned' ? 'badge-yellow' : p.status === 'active' ? 'badge-green' : 'badge-default';
+  return '<tr data-key="' + esc(p.id) + '">' +
+    '<td><strong>' + esc(p.symbol) + '</strong></td>' +
+    '<td><span class="badge ' + (p.direction === 'long' ? 'badge-green' : 'badge-red') + '">' + esc(p.direction) + '</span></td>' +
+    '<td>' + esc(p.market_type) + '</td>' +
+    '<td>' + p.leverage + 'x</td>' +
+    '<td>' + p.total_size + '</td>' +
+    '<td>' + p.entry_orders.length + '</td>' +
+    '<td>' + p.take_profits.length + '</td>' +
+    '<td>' + slText + '</td>' +
+    '<td><span class="badge ' + statusClass + '">' + esc(p.status) + '</span></td>' +
+    '<td>' +
+      (p.status === 'planned' || p.status === 'active' ? '<button class="btn btn-danger" style="font-size:11px;padding:2px 8px;" onclick="cancelLocalPlan(\'' + esc(p.id) + '\')">Abbrechen</button> ' : '') +
+      (p.status === 'cancelled' ? '<button class="btn" style="font-size:11px;padding:2px 8px;" onclick="deleteLocalPlan(\'' + esc(p.id) + '\')">Loeschen</button>' : '') +
+    '</td>' +
+    '</tr>';
 }
 
 async function cancelLocalPlan(id) {
@@ -1639,11 +2045,34 @@ async function updateTradePlans() {
 function renderTradePlans(plans, monitors) {
   var body = document.getElementById('tp-body');
   if (!plans || plans.length === 0) {
-    body.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine Plaene vorhanden</td></tr>';
+    tabelleZeichnen(body, '<tr data-key="leer"><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine Plaene vorhanden</td></tr>');
+    tradePlansBeendetZeichnen([], monitors);
     return;
   }
 
-  body.innerHTML = plans.map(function(p) {
+  var aktiv = plans.filter(function(p) { return !istBeendeterStatus(p.status); });
+  var beendet = plans.filter(function(p) { return istBeendeterStatus(p.status); });
+
+  tabelleZeichnen(body, aktiv.length
+    ? aktiv.map(function(p) { return tradePlanZeile(p, monitors); }).join('')
+    : '<tr data-key="leer"><td colspan="11" style="text-align:center;color:var(--text-muted);">Keine aktiven Plaene</td></tr>');
+
+  tradePlansBeendetZeichnen(beendet, monitors);
+}
+
+function tradePlansBeendetZeichnen(beendet, monitors) {
+  var block = document.getElementById('tp-beendet-block');
+  var body = document.getElementById('tp-beendet-body');
+  if (!block || !body) return;
+
+  block.style.display = beendet.length ? 'block' : 'none';
+  tabelleZeichnen(body, beendet.map(function(p) { return tradePlanZeile(p, monitors); }).join(''));
+
+  var zahl = document.getElementById('tp-beendet-zahl');
+  if (zahl) zahl.textContent = String(beendet.length);
+}
+
+function tradePlanZeile(p, monitors) {
     var sourceBadge = quellAbzeichen(p.source);
     var klickbar = ' style="cursor:pointer" title="Einzelheiten anzeigen"'
       + ' data-plan="' + esc(p.id) + '"'
@@ -1688,7 +2117,7 @@ function renderTradePlans(plans, monitors) {
     var sl = p.stop_loss_price ? ('$' + p.stop_loss_price) : '-';
     if (p.stop_loss_type === 'trailing') sl += ' (T)';
 
-    return '<tr' + klickbar + '>' +
+    return '<tr data-key="' + esc(p.id) + '"' + klickbar + '>' +
       '<td>' + sourceBadge + '</td>' +
       '<td><strong>' + p.symbol + '</strong></td>' +
       '<td style="' + dirClass + '">' + p.direction.toUpperCase() + '</td>' +
@@ -1701,7 +2130,6 @@ function renderTradePlans(plans, monitors) {
       '<td>' + statusBadge + '</td>' +
       '<td>' + monitorInfo + '</td>' +
       '</tr>';
-  }).join('');
 }
 
 function getPlanStatusBadge(status) {

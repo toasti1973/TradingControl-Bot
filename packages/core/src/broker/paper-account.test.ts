@@ -31,7 +31,7 @@ describe('PaperAccount — Ergebnisrechnung', () => {
   it('rechnet den Gewinn eines Long richtig ab', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    const r = k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market' });
+    const r = k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market', schliesst: true });
 
     // 0.1 * (52.000 − 50.000) = 200
     expect(r.realisiert).toBeCloseTo(200, 6);
@@ -43,7 +43,7 @@ describe('PaperAccount — Ergebnisrechnung', () => {
   it('rechnet den Verlust eines Long richtig ab', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market', schliesst: true });
 
     expect(k.stand().realisiert).toBeCloseTo(-200, 6);
     expect(k.stand().equity).toBeCloseTo(9_800, 6);
@@ -53,7 +53,7 @@ describe('PaperAccount — Ergebnisrechnung', () => {
   it('rechnet einen Short gegenlaeufig ab', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'ETHUSDT', seite: 'sell', menge: 2, preis: 3_000, orderArt: 'limit', hebel: 5 });
-    k.ordnungAusgefuehrt({ symbol: 'ETHUSDT', seite: 'buy', menge: 2, preis: 2_900, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'ETHUSDT', seite: 'buy', menge: 2, preis: 2_900, orderArt: 'market', schliesst: true });
 
     // Short gewinnt, wenn der Preis faellt: 2 * (3.000 − 2.900) = 200
     expect(k.stand().realisiert).toBeCloseTo(200, 6);
@@ -69,7 +69,7 @@ describe('PaperAccount — Ergebnisrechnung', () => {
     expect(pos.einstiegspreis).toBeCloseTo(49_000, 6);
 
     // Schliessen bei 50.000: 0.2 * (50.000 − 49.000) = 200
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.2, preis: 50_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.2, preis: 50_000, orderArt: 'market', schliesst: true });
     expect(k.stand().realisiert).toBeCloseTo(200, 6);
   });
 
@@ -78,26 +78,134 @@ describe('PaperAccount — Ergebnisrechnung', () => {
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.2, preis: 50_000, orderArt: 'limit', hebel: 10 });
 
     // TP1: 40 % bei 52.000 → 0.08 * 2.000 = 160
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.08, preis: 52_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.08, preis: 52_000, orderArt: 'market', schliesst: true });
     expect(k.stand().realisiert).toBeCloseTo(160, 6);
     expect(k.offenePositionen()[0]!.menge).toBeCloseTo(0.12, 10);
 
     // TP2: Rest bei 55.000 → 0.12 * 5.000 = 600
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.12, preis: 55_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.12, preis: 55_000, orderArt: 'market', schliesst: true });
     expect(k.stand().realisiert).toBeCloseTo(760, 6);
     expect(k.offenePositionen()).toHaveLength(0);
     expect(k.stand().trades).toBe(2);
   });
 
-  it('dreht die Position, wenn die Gegenorder groesser ist', () => {
+  it('dreht die Position NICHT, wenn die schliessende Order groesser ist', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.3, preis: 51_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.3, preis: 51_000, orderArt: 'market', schliesst: true });
 
-    expect(k.stand().realisiert).toBeCloseTo(100, 6);   // nur der geschlossene Teil
-    const pos = k.offenePositionen()[0]!;
-    expect(pos.seite).toBe('sell');
-    expect(pos.menge).toBeCloseTo(0.2, 10);
+    // Geschlossen wird, was offen war — der Rest verfaellt. Eine
+    // Nur-Schliessen-Order darf nichts eroeffnen; die Boerse weist sie
+    // ohnehin ab, bevor es so weit kommt.
+    expect(k.stand().realisiert).toBeCloseTo(100, 6);
+    expect(k.offenePositionen()).toHaveLength(0);
+  });
+});
+
+// ============================================================
+// Hedge-Modus: Long und Short auf demselben Symbol
+//
+// Phemex kann beide Richtungen nebeneinander fuehren, und der Bot
+// nutzt das: Zwei Signale auf dasselbe Symbol sind zwei Geschaefte.
+//
+// Vorher gab es nur eine Position je Symbol. Am 25.10. traf deshalb
+// ein BTCUSDT-Long-Einstieg auf einen laufenden Short und schloss ihn
+// teilweise — 0,65 USDT Verlust realisiert, ohne dass ein Stop
+// gelaufen waere. Beide Plaene handelten ein anderes Geschaeft als
+// das, das sie meinten.
+// ============================================================
+describe('PaperAccount — Hedge-Modus', () => {
+  it('fuehrt Long und Short auf demselben Symbol getrennt', () => {
+    const k = ohneGebuehren();
+
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.02, preis: 80_541, orderArt: 'limit', hebel: 7 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.06, preis: 80_513, orderArt: 'limit', hebel: 20 });
+
+    const offen = k.offenePositionen();
+    expect(offen).toHaveLength(2);
+
+    const long = k.position('BTCUSDT', 'buy')!;
+    const short = k.position('BTCUSDT', 'sell')!;
+    expect(long.menge).toBeCloseTo(0.02, 10);
+    expect(short.menge).toBeCloseTo(0.06, 10);
+
+    // Und nichts wurde dabei realisiert — es wurde nichts geschlossen.
+    expect(k.stand().realisiert).toBe(0);
+    expect(k.stand().trades).toBe(0);
+  });
+
+  it('laesst einen Long-Einstieg den laufenden Short unberuehrt', () => {
+    // Genau der Fall vom 25.10.
+    const k = ohneGebuehren();
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.0626, preis: 80_513.8, orderArt: 'limit', hebel: 20 });
+
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.0233, preis: 80_541.8, orderArt: 'limit', hebel: 7 });
+
+    // Der Short steht unveraendert.
+    expect(k.position('BTCUSDT', 'sell')!.menge).toBeCloseTo(0.0626, 10);
+    // Und es wurde nichts realisiert — frueher waren es hier −0,65.
+    expect(k.stand().realisiert).toBe(0);
+  });
+
+  it('schliesst beim Take-Profit die richtige der beiden Positionen', () => {
+    const k = ohneGebuehren();
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 80_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 81_000, orderArt: 'limit', hebel: 10 });
+
+    // Take-Profit auf den Long: Verkauf mit reduceOnly.
+    k.ordnungAusgefuehrt({
+      symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 82_000,
+      orderArt: 'market', schliesst: true,
+    });
+
+    // Der Long ist zu, der Short steht unveraendert.
+    expect(k.position('BTCUSDT', 'buy')).toBeNull();
+    expect(k.position('BTCUSDT', 'sell')!.menge).toBeCloseTo(0.1, 10);
+    // 0,1 × (82.000 − 80.000)
+    expect(k.stand().realisiert).toBeCloseTo(200, 6);
+  });
+
+  it('schliesst den Short mit einem Kauf, ohne den Long anzuruehren', () => {
+    const k = ohneGebuehren();
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 80_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 81_000, orderArt: 'limit', hebel: 10 });
+
+    k.ordnungAusgefuehrt({
+      symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 80_500,
+      orderArt: 'market', schliesst: true,
+    });
+
+    expect(k.position('BTCUSDT', 'sell')).toBeNull();
+    expect(k.position('BTCUSDT', 'buy')!.menge).toBeCloseTo(0.1, 10);
+    // Short bei 81.000 eingestiegen, bei 80.500 geschlossen: +50
+    expect(k.stand().realisiert).toBeCloseTo(50, 6);
+  });
+
+  it('bindet die Margin beider Positionen', () => {
+    const k = ohneGebuehren();
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 80_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 80_000, orderArt: 'limit', hebel: 10 });
+
+    // Zwei Positionen zu je 800 Einsatz — sie heben sich im Kapital
+    // NICHT auf, auch wenn sie sich im Kurs ausgleichen.
+    expect(k.stand().gebunden).toBeCloseTo(1_600, 4);
+  });
+
+  it('uebersteht einen Neustart mit beiden Richtungen', () => {
+    const k = new PaperAccount(10_000, 'USDT');
+    k.wiederherstellen({
+      startkapital: 10_000, realisiert: 0, gebuehren: 0,
+      trades: 0, gewinne: 0, verluste: 0,
+      positionen: [
+        { symbol: 'BTCUSDT', seite: 'buy', menge: 0.0233, einstiegspreis: 80_541.8, hebel: 7 },
+        { symbol: 'BTCUSDT', seite: 'sell', menge: 0.0626, einstiegspreis: 80_513.8, hebel: 20 },
+      ],
+    });
+
+    // Beide muessen wieder da sein — nicht nur die zuletzt geladene.
+    expect(k.offenePositionen()).toHaveLength(2);
+    expect(k.position('BTCUSDT', 'buy')!.menge).toBeCloseTo(0.0233, 10);
+    expect(k.position('BTCUSDT', 'sell')!.menge).toBeCloseTo(0.0626, 10);
   });
 });
 
@@ -136,7 +244,7 @@ describe('PaperAccount — Gebuehren', () => {
     const k = new PaperAccount(10_000, 'USDT', PHEMEX_FUTURES_GEBUEHREN);
     // Einstieg per Limit, Ausstieg per Market, winziger Kursgewinn
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 1, preis: 50_020, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 1, preis: 50_020, orderArt: 'market', schliesst: true });
 
     const s = k.stand();
     expect(s.realisiert).toBeCloseTo(20, 6);
@@ -162,7 +270,7 @@ describe('PaperAccount — gebundene Margin', () => {
   it('gibt die Margin beim Schliessen wieder frei', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 51_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 51_000, orderArt: 'market', schliesst: true });
 
     const s = k.stand();
     expect(s.gebunden).toBe(0);
@@ -183,7 +291,7 @@ describe('PaperAccount — Kontofuehrung', () => {
     k.onBuchung(b => buchungen.push(b));
 
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market', schliesst: true });
 
     // Beim Schliessen kommt der Gewinn vor der Gebuehr: Die Position
     // wird fortgeschrieben, bevor gebucht wird — nur so ist der an
@@ -225,6 +333,7 @@ describe('PaperAccount — Kontofuehrung', () => {
     k.onBuchung(() => staende.push(k.stand().gebunden));
     k.ordnungAusgefuehrt({
       symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market',
+      schliesst: true,
     });
 
     // Gewinn und Gebuehr — bei beiden ist die Position schon zu.
@@ -235,7 +344,7 @@ describe('PaperAccount — Kontofuehrung', () => {
   it('setzt das Konto zurueck', () => {
     const k = ohneGebuehren();
     k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market', schliesst: true });
     expect(k.stand().equity).toBeCloseTo(9_800, 6);
 
     k.zuruecksetzen(5_000);
@@ -289,7 +398,7 @@ describe('PaperAccount — Kontofuehrung', () => {
       ],
     });
 
-    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market' });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 52_000, orderArt: 'market', schliesst: true });
 
     expect(k.stand().realisiert).toBeCloseTo(200, 6);
     expect(k.stand().gebunden).toBe(0);
@@ -370,7 +479,7 @@ describe('PaperAccount — das Konto treibt die Positionsgroesse', () => {
     // Drei Verlusttrades zu je rund 2 % des Kontos
     for (let i = 0; i < 3; i++) {
       k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 0.1, preis: 50_000, orderArt: 'limit', hebel: 10 });
-      k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market' });
+      k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 0.1, preis: 48_000, orderArt: 'market', schliesst: true });
     }
 
     const s = k.stand();
@@ -379,5 +488,35 @@ describe('PaperAccount — das Konto treibt die Positionsgroesse', () => {
     expect(s.equity).toBeLessThan(9_400);          // plus Gebuehren
     // Genau darum geht es: Der naechste Trade faellt kleiner aus.
     expect(s.equity).toBeLessThan(10_000);
+  });
+});
+
+describe('PaperAccount — Trefferquote', () => {
+  it('zaehlt eine Null-Runde weder als Gewinn noch als Verlust', () => {
+    // Mit `>= 0` floss jeder Abschluss ohne Ergebnis in die Gewinne
+    // und schoente die Quote. Bei einem Konto, das der Beurteilung
+    // eines Signalgebers dient, ist das die falsche Richtung zu irren.
+    const k = new PaperAccount(10_000, 'USDT', { taker: 0, maker: 0 });
+
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 1, preis: 50_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 1, preis: 50_000, orderArt: 'market', schliesst: true });
+
+    const s = k.stand();
+    expect(s.trades).toBe(1);
+    expect(s.gewinne).toBe(0);
+    expect(s.verluste).toBe(0);
+  });
+
+  it('zaehlt Gewinn und Verlust weiterhin richtig', () => {
+    const k = new PaperAccount(10_000, 'USDT', { taker: 0, maker: 0 });
+
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'buy', menge: 1, preis: 50_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'BTCUSDT', seite: 'sell', menge: 1, preis: 51_000, orderArt: 'market', schliesst: true });
+    k.ordnungAusgefuehrt({ symbol: 'ETHUSDT', seite: 'buy', menge: 1, preis: 3_000, orderArt: 'limit', hebel: 10 });
+    k.ordnungAusgefuehrt({ symbol: 'ETHUSDT', seite: 'sell', menge: 1, preis: 2_900, orderArt: 'market', schliesst: true });
+
+    const s = k.stand();
+    expect(s.gewinne).toBe(1);
+    expect(s.verluste).toBe(1);
   });
 });

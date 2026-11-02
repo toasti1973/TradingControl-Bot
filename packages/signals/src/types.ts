@@ -24,8 +24,29 @@ import type {
  * `trigger` — Freigabe fuer bereits hinterlegte Plaene, die darauf warten
  * `close`   — offene Position zu diesem Symbol schliessen
  * `cancel`  — Plan abbrechen und offene Orders zuruecknehmen
+ * `update`  — den Stop eines LAUFENDEN Plans verschieben
+ *
+ * ## Warum `update` eine eigene Absicht ist
+ *
+ * Es ist die einzige Absicht, die in einen Trade eingreift, der schon
+ * im Markt steht. Entstanden aus einer konkreten Luecke: Ein Signal
+ * rechnet seinen Break-Even-Stop auf die GEPLANTE Einstiegsstaffel.
+ * Fuellt davon nur ein Teil — der Regelfall, denn nach dem ersten
+ * Take-Profit werden die restlichen Einstiege zurueckgenommen —, liegt
+ * der vorgegebene Stop unter dem tatsaechlichen Einstand, und der Plan
+ * kann trotz mitgenommenem Gewinn im Minus enden.
+ *
+ * Mit dem Rueckkanal erfaehrt TC-Synaptrix den echten Einstand und
+ * kann nachsteuern. Der Bot zieht den Stop allerdings schon von sich
+ * aus auf den Einstand (siehe `TradePlanMonitor.zieheStopAufEinstand`);
+ * ein `update` ist die genauere, spaetere Korrektur, nicht der einzige
+ * Schutz.
+ *
+ * `update` verschiebt NUR den Stop. Hebel, Groesse und Take-Profits
+ * bleiben unantastbar — sie zu aendern hiesse, mitten im Trade eine
+ * andere Strategie zu handeln als die, fuer die er eroeffnet wurde.
  */
-export type SignalAction = 'open' | 'trigger' | 'close' | 'cancel';
+export type SignalAction = 'open' | 'trigger' | 'close' | 'cancel' | 'update';
 
 /**
  * Rohform, wie sie aus dem Webhook eintrifft. Alles optional und von

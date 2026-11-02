@@ -15,6 +15,7 @@ import type { SqliteStore } from '../../store/sqlite-store.js';
 import type { SettingsService } from '../../services/settings-service.js';
 import type { Logger } from '../../services/log-service.js';
 import { VerlaufService } from '../../services/verlauf-service.js';
+import { ErgebnisService } from '../../services/ergebnis-service.js';
 
 export function createSignalsRouter(
   signals: SignalService,
@@ -63,6 +64,94 @@ export function createSignalsRouter(
     });
 
     res.json({ signals: angereichert, count: angereichert.length });
+  });
+
+  // ============================================================
+  // Auswertung: was aus den Signalen wurde
+  //
+  // Die Frage, auf die es ankommt: Taugt der Signalgeber? Dafuer
+  // zaehlt vor allem eine Gruppe — die Trades, die in den Stop liefen,
+  // OHNE vorher einen Take-Profit mitgenommen zu haben. Sie sind der
+  // Vollverlust, und ihre Haeufigkeit entscheidet ueber die Guete
+  // einer Strategie.
+  //
+  // Wer einen TP mitnahm und dann gestoppt wurde, gehoert nicht dazu:
+  // Dort hat die Strategie funktioniert, nur nicht bis zum Ende.
+  // ============================================================
+
+  router.get('/api/signals/auswertung', (req, res) => {
+    const nurFehlschlaege = req.query.nur === 'fehlschlaege';
+    const zeilen = auswertungsZeilen(store, verlauf, nurFehlschlaege);
+
+    // Die Kennzahlen immer ueber ALLE gehandelten Signale — sonst
+    // bezoege sich die Trefferquote auf die Fehlschlaege allein.
+    const alle = nurFehlschlaege ? auswertungsZeilen(store, verlauf, false) : zeilen;
+    const gehandelt = alle.filter(z => z.eingestiegen > 0);
+    const fehlschlaege = gehandelt.filter(z => z.istFehlschlag);
+
+    res.json({
+      zeilen,
+      kennzahlen: {
+        signaleGesamt: alle.length,
+        gehandelt: gehandelt.length,
+        fehlschlaege: fehlschlaege.length,
+        fehlschlagQuote: gehandelt.length > 0
+          ? Math.round((fehlschlaege.length / gehandelt.length) * 10000) / 100
+          : 0,
+        verlustDurchFehlschlaege:
+          Math.round(fehlschlaege.reduce((s, z) => s + z.realisiert, 0) * 100) / 100,
+
+        // Signale, die ins Leere liefen: Der Kurs stand beim Eingang
+        // schon jenseits aller Einstiege. Sie kosten nichts, sagen
+        // aber alles ueber die Rechtzeitigkeit eines Indikators —
+        // und aus den Trades allein waeren sie unsichtbar, weil sie
+        // gar keine erzeugen.
+        nieInReichweite: alle.filter(z => z.ausserhalbBeiEingang).length,
+        schnittAbstandBeiEingang: mittelwert(
+          alle.map(z => z.abstandBeiEingang).filter((x): x is number => x != null),
+        ),
+        nichtEingestiegen: alle.filter(z => z.eingestiegen <= 0).length,
+        ergebnisGesamt:
+          Math.round(gehandelt.reduce((s, z) => s + z.gesamt, 0) * 100) / 100,
+      },
+    });
+  });
+
+  /**
+   * Dieselben Daten als CSV — zur Auswertung ausserhalb des Bots.
+   *
+   * Semikolon als Trenner und Komma als Dezimalzeichen: So oeffnet
+   * eine deutsche Tabellenkalkulation die Datei ohne Nachfragen.
+   */
+  router.get('/api/signals/auswertung.csv', (req, res) => {
+    const nurFehlschlaege = req.query.nur === 'fehlschlaege';
+    const zeilen = auswertungsZeilen(store, verlauf, nurFehlschlaege);
+
+    const spalten = [
+      'Zeitpunkt', 'Strategie', 'Signal-Kennung', 'Symbol', 'Richtung', 'Hebel',
+      'Einstiege geplant', 'Einstiege gefuellt', 'Menge', 'Einstiegspreis',
+      'Einsatz', 'TPs erreicht', 'TPs gesamt', 'Stop getroffen', 'Stop nachgezogen',
+      'Verlauf', 'Ausgang', 'Fehlschlag', 'Realisiert', 'Gebuehren', 'Gesamt', 'Rendite %',
+      'Abstand bei Eingang %', 'Nie in Reichweite',
+    ];
+
+    const inhalt = [
+      spalten.join(';'),
+      ...zeilen.map(z => [
+        z.zeitpunkt, z.strategie, z.signalId, z.symbol, z.richtung, z.hebel,
+        z.einstiegeGeplant, z.einstiegeGefuellt, z.menge, z.einstiegspreis,
+        z.einsatz, z.tpsErreicht, z.tpsGesamt, z.slGetroffen ? 'ja' : 'nein',
+        z.slNachgezogen ? 'ja' : 'nein', z.kette, z.ausgang,
+        z.istFehlschlag ? 'ja' : 'nein', z.realisiert, z.gebuehren, z.gesamt, z.renditePct,
+        z.abstandBeiEingang, z.ausserhalbBeiEingang ? 'ja' : 'nein',
+      ].map(csvFeld).join(';')),
+    ].join('\r\n');
+
+    const name = nurFehlschlaege ? 'signale-fehlschlaege' : 'signale-auswertung';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}.csv"`);
+    // Byte Order Mark, damit Excel die Umlaute richtig liest.
+    res.send('﻿' + inhalt);
   });
 
   router.get('/api/signals/einstellungen', (_req, res) => {
@@ -345,4 +434,162 @@ function sicherParsen(text: string | null): unknown {
   } catch {
     return null;
   }
+}
+
+// ============================================================
+// Auswertung der Signale
+// ============================================================
+
+/** Eine Zeile der Auswertung — ein Signal und was daraus wurde. */
+interface AuswertungsZeile {
+  zeitpunkt: string;
+  strategie: string;
+  signalId: string;
+  planId: string;
+  symbol: string;
+  richtung: string;
+  hebel: number;
+  einstiegeGeplant: number;
+  einstiegeGefuellt: number;
+  eingestiegen: number;
+  menge: number;
+  einstiegspreis: number | null;
+  einsatz: number | null;
+  tpsErreicht: number;
+  tpsGesamt: number;
+  slGetroffen: boolean;
+  slNachgezogen: boolean;
+  kette: string;
+  ausgang: string;
+  /** In den Stop gelaufen, ohne vorher einen Take-Profit zu nehmen. */
+  istFehlschlag: boolean;
+
+  /**
+   * Wie weit der Markt beim Signaleingang vom naechsten Einstieg
+   * entfernt war, in Prozent. `null`, wenn nicht gemessen.
+   */
+  abstandBeiEingang: number | null;
+  /** Lag der Kurs schon jenseits ALLER Einstiege? */
+  ausserhalbBeiEingang: boolean;
+  realisiert: number;
+  gebuehren: number;
+  gesamt: number;
+  renditePct: number | null;
+}
+
+/**
+ * Baut die Auswertung aus Signalen, Plaenen und deren Verlauf.
+ *
+ * Gerechnet wird aus den tatsaechlich abgeschickten Orders — nicht aus
+ * dem, was der Plan vorsah. Nur sie wissen, was wirklich geschah.
+ */
+export function auswertungsZeilen(
+  store: SqliteStore,
+  verlauf: VerlaufService,
+  nurFehlschlaege: boolean,
+): AuswertungsZeile[] {
+  const ergebnisService = new ErgebnisService(store);
+  const zeilen: AuswertungsZeile[] = [];
+
+  for (const bp of store.getBotTradePlans({})) {
+    if (bp.source !== 'signal') continue;   // Nur, was aus Signalen kam.
+
+    const planId = String(bp.id);
+    const richtung = bp.direction === 'short' ? 'short' : 'long';
+    const hebel = Number(bp.leverage) || 1;
+
+    const e = ergebnisService.fuerPlan(planId, richtung, hebel, null);
+    const v = verlauf.fuerPlan(planId);
+    const herkunft = sicherParsen(bp.signal_origin as string | null) as {
+      strategy?: string; signal_id?: string; received_at?: string;
+      marktlage?: { abstandPct?: number; ausserhalb?: boolean };
+    } | null;
+
+    const tps = (sicherParsen(bp.take_profits as string | null) as unknown[] | null) ?? [];
+    const entries = (sicherParsen(bp.entry_orders as string | null) as unknown[] | null) ?? [];
+
+    // Take-Profits und Stop aus den ORDERS, nicht aus dem Protokoll.
+    //
+    // Der Verlauf-Dienst liest `bot_execution_reports`; die Orders sind
+    // die verlaesslichere Quelle (CLAUDE.md: gerechnet wird aus den
+    // tatsaechlich abgeschickten Orders). Bei einem Plan, dessen
+    // Protokoll eine Luecke hat, bliebe ein Fehlschlag sonst
+    // unerkannt — und genau die will diese Liste zeigen.
+    const orders = store.getPlanOrders(planId);
+    const tpsErreicht = orders.filter(o =>
+      o.role === 'take_profit' && (Number(o.filled_quantity) || 0) > 0).length;
+    const slGetroffen = orders.some(o =>
+      (o.role === 'stop_loss' || o.role === 'trailing_stop') &&
+      (Number(o.filled_quantity) || 0) > 0);
+
+    // Der Fehlschlag: eingestiegen, in den Stop gelaufen, kein
+    // einziger Take-Profit davor — UND mit Verlust geendet.
+    //
+    // Die letzte Bedingung ist keine Kosmetik. Nicht jede als
+    // `stop_loss` verbuchte Order ist ein gerissener Stop: Auch das
+    // Schliessen von Hand wird so eingetragen, denn ein Abbruch ist
+    // kein erreichtes Ziel. Der BNBUSDT-Plan vom 25.10. endete so mit
+    // +17,43 und stand trotzdem unter den Fehlschlaegen. Ein Trade im
+    // Plus gehoert dort nicht hin, gleich wie seine Orders heissen.
+    const istFehlschlag = e.eingestiegen > 0 && tpsErreicht === 0 &&
+      slGetroffen && e.gesamt < 0;
+
+    if (nurFehlschlaege && !istFehlschlag) continue;
+
+    zeilen.push({
+      zeitpunkt: String(herkunft?.received_at ?? bp.created_at ?? ''),
+      strategie: String(herkunft?.strategy ?? '–'),
+      signalId: String(herkunft?.signal_id ?? '–'),
+      planId,
+      symbol: String(bp.symbol),
+      richtung,
+      hebel,
+      einstiegeGeplant: entries.length,
+      einstiegeGefuellt: e.einstiegeGefuellt,
+      eingestiegen: e.eingestiegen,
+      menge: e.eingestiegen,
+      einstiegspreis: e.einstiegsPreis,
+      einsatz: e.einsatz,
+      tpsErreicht,
+      tpsGesamt: tps.length,
+      slGetroffen,
+      slNachgezogen: v.slNachgezogen,
+      kette: v.kette,
+      ausgang: v.ausgang,
+      istFehlschlag,
+      abstandBeiEingang: herkunft?.marktlage?.abstandPct ?? null,
+      ausserhalbBeiEingang: herkunft?.marktlage?.ausserhalb === true,
+      realisiert: e.realisiert,
+      gebuehren: e.gebuehren,
+      gesamt: e.gesamt,
+      renditePct: e.renditePct,
+    });
+  }
+
+  // Das Juengste zuerst.
+  zeilen.sort((a, b) => b.zeitpunkt.localeCompare(a.zeitpunkt));
+  return zeilen;
+}
+
+/**
+ * Ein Feld fuer die CSV-Datei.
+ *
+ * Zahlen bekommen das deutsche Dezimalkomma, Texte mit Semikolon oder
+ * Anfuehrungszeichen werden eingefasst. Ohne das zerfiele eine
+ * Verlaufskette wie "E1+E2 → TP1" an einem Semikolon in zwei Spalten.
+ */
+export function csvFeld(wert: unknown): string {
+  if (wert == null) return '';
+  if (typeof wert === 'number') {
+    return Number.isFinite(wert) ? String(wert).replace('.', ',') : '';
+  }
+  const text = String(wert);
+  if (/[;"\r\n]/.test(text)) return '"' + text.replace(/"/g, '""') + '"';
+  return text;
+}
+
+/** Mittelwert oder null — eine 0 waere hier eine Behauptung. */
+function mittelwert(werte: number[]): number | null {
+  if (werte.length === 0) return null;
+  return Math.round((werte.reduce((s, w) => s + w, 0) / werte.length) * 100) / 100;
 }

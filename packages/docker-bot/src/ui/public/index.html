@@ -56,6 +56,9 @@
       <a id="nav-trades" class="nav-item" href="#trades" onclick="navigate('trades')">
         <span class="nav-text">Trade History</span>
       </a>
+      <a id="nav-auswertung" class="nav-item" href="#auswertung" onclick="navigate('auswertung')">
+        <span class="nav-text">Auswertung</span>
+      </a>
       <a id="nav-copytrading" class="nav-item" href="#copytrading" onclick="navigate('copytrading')">
         <span class="nav-text">CopyTrading</span>
       </a>
@@ -120,6 +123,7 @@
           <div class="card">
             <div class="card-label">ROI</div>
             <div class="card-value" id="kpi-roi">--</div>
+            <div id="kpi-roi-basis" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
           </div>
           <div class="card">
             <div class="card-label">Unrealisierter PnL</div>
@@ -169,6 +173,7 @@
               <span id="risk-drawdown">0%</span>
             </div>
           </div>
+          <div id="risk-bezug" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
           <div id="risk-cooldowns" style="margin-top:8px;font-size:12px;color:var(--yellow);display:none;"></div>
           <div id="risk-halt-reason" style="margin-top:8px;font-size:13px;color:var(--red);display:none;"></div>
         </div>
@@ -183,27 +188,58 @@
         <div class="table-container">
           <table>
             <thead>
-              <tr><th>Symbol</th><th>Richtung</th><th>Groesse</th><th>Fortschritt</th><th>SL</th><th>Kurs</th><th>Ergebnis</th><th>Status</th><th>Quelle</th><th>Start</th><th></th></tr>
+              <tr><th>Symbol</th><th>Richtung</th><th>Groesse</th><th>Einstiege</th><th>Fortschritt</th><th>SL</th><th>Kurs</th><th>Ergebnis</th><th>Rendite</th><th>Status</th><th>Quelle</th><th>Start</th><th></th></tr>
             </thead>
             <tbody id="active-plans-body">
-              <tr><td colspan="11" class="empty-state">Keine aktiven Plaene</td></tr>
+              <tr><td colspan="13" class="empty-state">Keine aktiven Plaene</td></tr>
             </tbody>
           </table>
+        </div>
+
+        <!-- Beendete Plaene: getrennt, damit der Blick auf die aktiven
+             nicht an erledigten haengenbleibt. -->
+        <div id="dash-beendet-block" style="display:none;margin-top:24px">
+          <h3 style="margin-bottom: 12px; font-size: 15px;">
+            Beendet <span id="dash-beendet-zahl" class="badge badge-default"></span>
+          </h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr><th>Symbol</th><th>Richtung</th><th>Groesse</th><th>Einstiege</th><th>Ausgang</th><th>Ergebnis</th><th>Rendite</th><th>Status</th><th>Quelle</th><th>Beendet</th></tr>
+              </thead>
+              <tbody id="dash-beendet-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
       <!-- Plans -->
       <section id="page-plans" style="display:none">
         <div class="page-header"><h2>Handelsplaene</h2></div>
+        <h3 style="margin-bottom: 12px; font-size: 15px;">Aktiv</h3>
         <div class="table-container">
           <table>
             <thead>
-              <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Status</th><th>Bot</th><th>Ergebnis</th><th>Quelle</th><th>Erstellt</th><th></th></tr>
+              <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Einstiege</th><th>Status</th><th>Bot</th><th>Ergebnis</th><th>Rendite</th><th>Quelle</th><th>Erstellt</th><th></th></tr>
             </thead>
             <tbody id="plans-body">
-              <tr><td colspan="10" class="empty-state">Keine Plaene vorhanden</td></tr>
+              <tr><td colspan="12" class="empty-state">Keine Plaene vorhanden</td></tr>
             </tbody>
           </table>
+        </div>
+
+        <div id="plans-beendet-block" style="display:none;margin-top:24px">
+          <h3 style="margin-bottom: 12px; font-size: 15px;">
+            Beendet <span id="plans-beendet-zahl" class="badge badge-default"></span>
+          </h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Einstiege</th><th>Status</th><th>Bot</th><th>Ergebnis</th><th>Rendite</th><th>Quelle</th><th>Erstellt</th><th></th></tr>
+              </thead>
+              <tbody id="plans-beendet-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -217,6 +253,7 @@
         <div id="planning-alert" style="display:none" class="settings-alert"></div>
 
         <!-- Plan List -->
+        <h3 style="margin-bottom: 12px; font-size: 15px;">Aktiv</h3>
         <div id="local-plans-list" class="table-container">
           <table>
             <thead>
@@ -226,6 +263,20 @@
               <tr><td colspan="10" class="empty-state">Keine lokalen Plaene vorhanden</td></tr>
             </tbody>
           </table>
+        </div>
+
+        <div id="local-beendet-block" style="display:none;margin-top:24px">
+          <h3 style="margin-bottom: 12px; font-size: 15px;">
+            Beendet <span id="local-beendet-zahl" class="badge badge-default"></span>
+          </h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr><th>Symbol</th><th>Richtung</th><th>Markt</th><th>Hebel</th><th>Groesse</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th><th>Aktionen</th></tr>
+              </thead>
+              <tbody id="local-beendet-body"></tbody>
+            </table>
+          </div>
         </div>
 
         <!-- Plan Form (overlay) -->
@@ -453,6 +504,43 @@
           </table>
         </div>
 
+        <!-- Fehlschlaege: in den Stop, ohne je einen TP mitzunehmen.
+             Die Gruppe, an der sich die Guete eines Signalgebers
+             entscheidet. -->
+        <div class="card" style="margin-top:24px">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <div>
+              <h3 class="settings-section-title" style="margin:0">
+                Fehlschlaege <span id="fs-zahl" class="badge badge-red"></span>
+              </h3>
+              <p class="form-hint" style="margin:4px 0 0">
+                In den Stop gelaufen, ohne vorher einen Take-Profit mitzunehmen.
+              </p>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-secondary" style="font-size:12px"
+                      onclick="auswertungExportieren(true)">Fehlschlaege als CSV</button>
+              <button class="btn btn-secondary" style="font-size:12px"
+                      onclick="auswertungExportieren(false)">Alle Signale als CSV</button>
+            </div>
+          </div>
+
+          <div id="fs-kennzahlen" class="cards" style="margin:12px 0"></div>
+
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Zeit</th><th>Strategie</th><th>Symbol</th><th>Richtung</th>
+                  <th>Einstiege</th><th>Menge</th><th>Einstieg</th><th>Einsatz</th>
+                  <th>Verlauf</th><th>Verlust</th><th>Rendite</th>
+                </tr>
+              </thead>
+              <tbody id="fs-body"></tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- Kontoblatt -->
         <div class="table-container">
           <div class="page-header" style="padding:12px 16px;">
@@ -475,7 +563,7 @@
         <div class="table-container">
           <table>
             <thead>
-              <tr><th>Zeit</th><th>Symbol</th><th>Aktion</th><th>Groesse</th><th>Avg. Entry</th><th>PnL</th><th>ROI</th><th>Plan</th></tr>
+              <tr><th>Zeit</th><th>Symbol</th><th>Richtung</th><th>Aktion</th><th>Menge</th><th>Preis</th><th>Einstieg</th><th>Gebuehr</th><th>PnL</th><th>ROI</th><th>Quelle</th></tr>
             </thead>
             <tbody id="trades-body">
               <tr><td colspan="8" class="empty-state">Keine Trades vorhanden</td></tr>
@@ -543,6 +631,133 @@
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div id="tp-beendet-block" class="card" style="display:none">
+          <h3 class="settings-section-title">
+            Beendet <span id="tp-beendet-zahl" class="badge badge-default"></span>
+          </h3>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Quelle</th>
+                  <th>Symbol</th>
+                  <th>Richtung</th>
+                  <th>Strategy</th>
+                  <th>Zonen / Entries</th>
+                  <th>TPs</th>
+                  <th>SL</th>
+                  <th>Activation</th>
+                  <th>Trigger</th>
+                  <th>Status</th>
+                  <th>Monitor</th>
+                </tr>
+              </thead>
+              <tbody id="tp-beendet-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Auswertung: taugt der Signalgeber? -->
+      <section id="page-auswertung" style="display:none">
+        <div class="page-header">
+          <h2>Auswertung</h2>
+          <span class="page-subtitle">Gemessen in R &mdash; dem Risiko, das ein Trade am Stop eingeht</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <select id="aw-strategie" onchange="auswertungLaden()"
+                    style="padding:6px 10px;font-size:13px"></select>
+            <button class="btn btn-secondary" style="font-size:12px"
+                    onclick="auswertungExportR()">Trades als CSV</button>
+          </div>
+        </div>
+
+        <!--
+          Vorbehalte zur Messreihe — aufklappbar, aber immer sichtbar.
+
+          Ein Vermerk, der nur in docs/ liegt, wird beim Auswerten
+          nicht gelesen. Die Zahlen darunter enthalten bekannte
+          Verfaelschungen; wer sie ohne diesen Hinweis vergleicht,
+          zieht Schluesse ueber eine Strategie aus Daten, die von
+          behobenen Fehlern stammen.
+        -->
+        <details id="aw-vorbehalte" style="margin-bottom:16px;border:1px solid var(--warn,#b8860b);
+                 border-radius:6px;background:rgba(184,134,11,0.08);padding:10px 14px">
+          <summary style="cursor:pointer;font-size:13px;color:var(--warn,#d4a017);font-weight:600">
+            &#9888; Diese Messreihe enth&auml;lt bekannte Verf&auml;lschungen &mdash; vor dem Vergleichen lesen
+          </summary>
+          <div style="font-size:13px;line-height:1.6;margin-top:10px;color:var(--text-secondary,#aaa)">
+            <p style="margin:0 0 8px">
+              <strong>Uneingeschr&auml;nkt brauchbar erst ab 02.11.2026, 10:06.</strong>
+              Davor wurden Fehler gefunden und behoben, deren Spuren in den Daten bleiben.
+            </p>
+            <ul style="margin:0 0 8px;padding-left:18px">
+              <li><strong>9 Buchungen am 02.11., 10:04&ndash;10:05</strong> sind keine Trades,
+                  sondern Zwangsschlie&szlig;ungen aus der Bereinigung
+                  (6 Gewinne, 3 Verluste, zusammen &minus;370,73&nbsp;USDT).
+                  Ohne sie: 52 statt 61 Trades, Trefferquote 46,2&nbsp;% statt 49,2&nbsp;%.</li>
+              <li><strong>Bis 02.11.</strong> wurde der Hebel teilweise als 1 gebucht &mdash;
+                  alle margin&shy;bezogenen Kennzahlen (Rendite&nbsp;%, Einsatz) sind dort unsicher.
+                  Absolute Ergebnisse in USDT sind nicht betroffen.</li>
+              <li><strong>Bis 27.10.</strong> traf der Break-Even-Stop die geplante statt der
+                  tats&auml;chlichen Einstiegsstaffel, und der Stop hielt das letzte erreichte
+                  Ziel nicht.</li>
+            </ul>
+            <p style="margin:0">
+              Vollst&auml;ndig in <code>docs/DATENVORBEHALTE-AUSWERTUNG.md</code>.
+            </p>
+          </div>
+        </details>
+
+        <div id="aw-kennzahlen" class="cards" style="margin-bottom:16px"></div>
+
+        <!-- Kontoverlauf -->
+        <div class="card" style="margin-bottom:24px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+            <div>
+              <h3 style="margin:0;font-size:15px">Kontoverlauf</h3>
+              <p class="form-hint" style="margin:4px 0 0" id="aw-verlauf-hinweis"></p>
+            </div>
+            <div id="aw-verlauf-zahlen" style="display:flex;gap:20px;font-size:13px"></div>
+          </div>
+          <div id="aw-equity" style="margin-top:12px"></div>
+        </div>
+
+        <!-- Ausschlaege: sass der Stop zu eng? -->
+        <div class="card" style="margin-bottom:24px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+            <div>
+              <h3 style="margin:0;font-size:15px">Stop und Ziele</h3>
+              <p class="form-hint" style="margin:4px 0 0">
+                Wie weit lief jeder Trade gegen und fuer uns, bevor er endete.
+                Braucht Kerzen von der Boerse &mdash; deshalb auf Anforderung.
+              </p>
+            </div>
+            <button id="aw-mae-knopf" class="btn btn-secondary" style="font-size:12px"
+                    onclick="ausschlaegeLaden()">Berechnen</button>
+          </div>
+          <div id="aw-mae" style="margin-top:12px"></div>
+        </div>
+
+        <!-- Die Trades selbst -->
+        <h3 style="margin-bottom:12px;font-size:15px">Abgeschlossene Trades</h3>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Beendet</th><th>Symbol</th><th>Richtung</th><th>Strategie</th>
+                <th style="text-align:right">Menge</th>
+                <th style="text-align:right">Einstieg</th>
+                <th style="text-align:right">Risiko</th>
+                <th style="text-align:right">Ergebnis</th>
+                <th style="text-align:right">R</th>
+                <th>Verlauf</th>
+                <th style="text-align:right">Dauer</th>
+              </tr>
+            </thead>
+            <tbody id="aw-trades"></tbody>
+          </table>
         </div>
       </section>
 
@@ -1030,6 +1245,7 @@
   <script src="/vendor/klinecharts.min.js"></script>
   <script src="/js/chart.js?v=202610251115"></script>
   <script src="/js/signale.js?v=202610251115"></script>
+  <script src="/js/auswertung.js?v=202610261500"></script>
   <script src="/js/app.js?v=202610251115"></script>
 </body>
 </html>

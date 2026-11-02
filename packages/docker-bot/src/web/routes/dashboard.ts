@@ -29,7 +29,20 @@ import { TcApiClient } from '@tradingcontrol/core';
  * verbergen hiesse, die Zuschauen-Phase eines neuen Signalgebers blind
  * zu verbringen.
  */
-const AKTIVE_STATUS = new Set(['planned', 'active', 'monitoring', 'executing']);
+export const AKTIVE_STATUS = new Set(['planned', 'active', 'monitoring', 'executing']);
+
+/**
+ * Status, die einen Plan als erledigt ausweisen.
+ *
+ * Sie gehoeren in eine eigene Liste, nicht unter die aktiven: Ein
+ * abgeschlossener Trade zwischen laufenden laesst den Blick nach dem
+ * suchen, was gerade Aufsicht braucht. 'error' zaehlt dazu — der Plan
+ * handelt nicht mehr, auch wenn er nicht planmaessig endete.
+ */
+export const BEENDETE_STATUS = new Set(['completed', 'cancelled', 'error']);
+
+/** Wieviele beendete Plaene das Dashboard hoechstens zurueckblickt. */
+const BEENDETE_HOECHSTENS = 25;
 
 export function createDashboardRouter(
   botService: BotService,
@@ -45,6 +58,9 @@ export function createDashboardRouter(
     const engine = botService.getEngine();
 
     const plans: Record<string, unknown>[] = [];
+    // Beendete Plaene stehen fuer sich. In die KPI gehen sie nicht ein:
+    // Sie binden nichts mehr und haben nichts Offenes.
+    const beendet: Record<string, unknown>[] = [];
     // Gegen Doppelzaehlung: Taucht dieselbe Plan-ID in zwei Bestaenden
     // auf, zaehlte ihre Margin sonst zweimal in die KPI.
     const gesehen = new Set<string>();
@@ -83,7 +99,12 @@ export function createDashboardRouter(
     // aus dem Journal gespiegelt, hier angelegt oder aus einem externen
     // Handelssignal entstanden.
     for (const bp of store.getBotTradePlans({})) {
-      if (!AKTIVE_STATUS.has(String(bp.status))) continue;
+      const status = String(bp.status);
+      const istAktiv = AKTIVE_STATUS.has(status);
+      const istBeendet = BEENDETE_STATUS.has(status);
+      // Ein unbekannter Status gehoert in keine der beiden Listen —
+      // lieber nichts behaupten als ihn falsch einsortieren.
+      if (!istAktiv && !istBeendet) continue;
 
       const hebel = Number(bp.leverage) || 1;
       const kennzahlen = einstiegsKennzahlen(bp.entry_orders, hebel, String(bp.direction));
@@ -104,21 +125,50 @@ export function createDashboardRouter(
         monitor.getState(String(bp.id))?.lastPrice ?? null,
       );
 
-      aufnehmen({
+      const datensatz = {
         id: bp.id, symbol: bp.symbol, direction: bp.direction, status: bp.status,
         source: bp.source,
         exchange: bp.exchange,
         leverage: hebel,
         total_size: totalSize,
+        // Wieviele Teil-Einstiege vorgesehen sind. Zusammen mit
+        // ergebnis.einstiegeGefuellt ergibt das die Angabe "2 von 4
+        // Einstiegen ausgefuehrt" — ohne sie bliebe in der Uebersicht
+        // offen, ob der Trade halb oder ganz im Markt steht.
+        entries_geplant: kennzahlen.anzahl,
         avg_entry: ergebnis.einstiegsPreis ?? kennzahlen.avgEntry,
         margin,
         liq_price: kennzahlen.liqPrice,
         stop_loss_price: bp.stop_loss_price,
         bot_enabled: !!bp.bot_enabled,
         created_at: bp.created_at,
+        updated_at: bp.updated_at,
         ergebnis,
-      });
+      };
+
+      if (istAktiv) {
+        aufnehmen(datensatz);
+      } else {
+        beendet.push(datensatz);
+      }
     }
+
+    // Die zuletzt beendeten zuerst — was gerade ausging, interessiert
+    // mehr als das von vorgestern.
+    beendet.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')));
+
+    // Was die beendeten Plaene eingebracht haben — gezaehlt VOR dem
+    // Kuerzen der Liste. Sonst haengte die Kennzahl daran, wieviele
+    // Zeilen die Oberflaeche gerade zeigt.
+    //
+    // Dass sie ueberhaupt gezaehlt werden, ist der Punkt: Bisher fielen
+    // abgeschlossene Plaene aus den aktiven heraus und nahmen ihren
+    // realisierten Gewinn mit. Ein Trade, der mit Take-Profit schloss,
+    // verschwand damit aus der Bilanz — genau der Trade, an dem sich
+    // die Guete des Signalgebers zeigt.
+    const realisiertBeendet = beendet.reduce((s, p) => s + (ergebnisVon(p)?.realisiert ?? 0), 0);
+    const beendetGesamt = beendet.length;
+    beendet.length = Math.min(beendet.length, BEENDETE_HOECHSTENS);
 
     // Welche Plaene der Monitor tatsaechlich fuehrt.
     //
@@ -130,27 +180,83 @@ export function createDashboardRouter(
     for (const p of plans) {
       p.ueberwacht = ueberwacht.has(String(p.id));
     }
+    for (const p of beendet) {
+      p.ueberwacht = ueberwacht.has(String(p.id));
+    }
 
     // KPIs
     const trades = store.getTrades(1000, 0);
     // Realisiert: die Trades der TradingEngine plus das, was die
-    // Vollplaene eingebracht haben. Beide Pfade fuehren eigene Buecher
-    // (CLAUDE.md, Regel 3), fuer die Kennzahl zaehlt die Summe.
+    // Vollplaene eingebracht haben — die laufenden wie die beendeten.
+    // Beide Pfade fuehren eigene Buecher (CLAUDE.md, Regel 3), fuer die
+    // Kennzahl zaehlt die Summe.
     const realizedPnl = trades.reduce((s, t) => s + (t.pnl || 0), 0)
-      + plans.reduce((s, p) => s + (ergebnisVon(p)?.realisiert ?? 0), 0);
+      + plans.reduce((s, p) => s + (ergebnisVon(p)?.realisiert ?? 0), 0)
+      + realisiertBeendet;
     const unrealizedPnl = plans.reduce((s, p) => s + (ergebnisVon(p)?.unrealisiert ?? 0), 0);
 
     // Die geplante Margin aller gezeigten Plaene — nicht die an der
     // Boerse tatsaechlich gebundene. Was davon schon gebunden ist, sagt
     // das Uebungskonto bzw. die Boerse.
-    const totalMargin = plans.reduce((s, p) => s + (Number(p.margin) || 0), 0);
+    // Gebunden ist der Einsatz der OFFENEN Position, nicht die Margin
+    // des ganzen Plans. Bei einem gestaffelten Einstieg, von dem erst
+    // ein Teil gefuellt wurde, liegt dazwischen ein Vielfaches — und
+    // ein Dashboard, das die geplante Margin als eingesetzt ausweist,
+    // behauptet gebundenes Kapital, das noch frei ist.
+    const totalMargin = plans.reduce((s, p) => {
+      const e = ergebnisVon(p);
+
+      // `einsatzOffen` statt `einsatz`.
+      //
+      // `einsatz` summiert alle Einstiege, auch die laengst wieder
+      // geschlossenen — fuer die Rendite ist das richtig, fuer die
+      // Frage "wieviel ist gerade gebunden" nicht. Nach einem
+      // Take-Profit wiese es Kapital als gebunden aus, das wieder frei
+      // ist.
+      //
+      // Die Formel stand hier bis zum 26.10. von Hand; sie liegt jetzt
+      // im ErgebnisService, damit Dashboard und Detailansicht nicht
+      // zwei Fassungen derselben Zahl fuehren.
+      if (e && e.einsatzOffen != null) return s + e.einsatzOffen;
+      // Ein Plan ohne offene Position bindet nichts.
+      if (e) return s;
+
+      // Engine- und local_plans fuehren keine Ergebnisrechnung.
+      return s + (Number(p.margin) || 0);
+    }, 0);
+    // Die Rendite bezieht sich auf das KAPITAL, nicht auf die gerade
+    // gebundene Margin.
+    //
+    // Hier stand `realizedPnl / totalMargin`, und die beiden passten
+    // nicht zusammen: Im Zaehler das Ergebnis ALLER Plaene, auch der
+    // laengst beendeten; im Nenner nur, was in diesem Augenblick
+    // gebunden ist. Steht nichts mehr offen, wurde die Rendite zu 0,
+    // obwohl Gewinne vorlagen; blieb ein Prozent gebunden, sprang sie
+    // ins Tausendfache — am 26.10. standen dort −3.141 %.
+    //
+    // "Wieviel Prozent hat das Konto gewonnen oder verloren" ist die
+    // Frage, die sich wirklich stellt.
+    const kapitalBasis = verwendetesKapital(store);
     const kpi = {
       margin: Math.round(totalMargin * 100) / 100,
       realizedPnl: Math.round(realizedPnl * 100) / 100,
-      roi: totalMargin > 0 ? Math.round((realizedPnl / totalMargin) * 10000) / 100 : 0,
+      roi: kapitalBasis > 0
+        ? Math.round((realizedPnl / kapitalBasis) * 10000) / 100
+        : 0,
       unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
+      /** Worauf sich die Rendite bezieht — damit die Zahl lesbar bleibt. */
+      roiBasis: Math.round(kapitalBasis * 100) / 100,
     };
 
+    // Die Risiko-Kennzahlen aus den tatsaechlichen Abschluessen.
+    //
+    // Der RiskGuard der TradingEngine kennt nur, was ueber IHREN Pfad
+    // lief (CLAUDE.md, Regel 3). Die Signal-Plaene laufen ueber den
+    // TradePlanMonitor und wurden ihm nie gemeldet — die Anzeige stand
+    // deshalb auf 0,0 %, waehrend 92,80 USDT verloren waren. Eine
+    // Risikoanzeige, die den gerade laufenden Handel nicht sieht, ist
+    // schlimmer als keine: Sie beruhigt.
+    const gerechnet = risikoKennzahlen(store, ergebnisService, kapitalBasis);
     const riskStats = engine?.getRiskGuard().getStats() ?? null;
 
     // Volatility stats for watched symbols
@@ -171,15 +277,29 @@ export function createDashboardRouter(
       totalTrades: stats.totalTrades,
       lastError: stats.lastError,
       plans,
+      // Erledigte Plaene stehen fuer sich, mit ihrer Gesamtzahl: Die
+      // Liste ist gekuerzt, die Zahl darunter ist es nicht.
+      beendet,
+      beendetGesamt,
       kpi,
-      risk: riskStats ? {
-        dailyLossPct: (riskStats.dailyLossPct * 100).toFixed(1),
-        weeklyLossPct: (riskStats.weeklyLossPct * 100).toFixed(1),
-        drawdownPct: (riskStats.drawdownPct * 100).toFixed(1),
-        halted: riskStats.halted,
-        haltReason: riskStats.haltReason,
-        cooldowns: riskStats.cooldowns,
-      } : null,
+      // Die Zahlen aus der eigenen Rechnung, Sperre und Cooldowns vom
+      // RiskGuard: Er allein haelt den Handel an, und was er dabei
+      // sieht, bleibt seine Sache.
+      //
+      // Die hoehere der beiden Verlustzahlen gewinnt — die Anzeige
+      // soll das groessere Risiko nennen, nicht das kleinere.
+      risk: {
+        dailyLossPct: hoechstes(gerechnet.tagesverlustPct, riskStats?.dailyLossPct).toFixed(1),
+        weeklyLossPct: hoechstes(gerechnet.wochenverlustPct, riskStats?.weeklyLossPct).toFixed(1),
+        drawdownPct: hoechstes(gerechnet.drawdownPct, riskStats?.drawdownPct).toFixed(1),
+        halted: riskStats?.halted ?? false,
+        haltReason: riskStats?.haltReason ?? '',
+        cooldowns: riskStats?.cooldowns ?? {},
+        // Fuer den Hinweistext: worauf sich die Prozente beziehen.
+        kapital: Math.round(gerechnet.kapital * 100) / 100,
+        realisiertHeute: Math.round(gerechnet.realisiertHeute * 100) / 100,
+        realisiertWoche: Math.round(gerechnet.realisiertWoche * 100) / 100,
+      },
       volatility,
     });
   });
@@ -259,7 +379,10 @@ function einstiegsKennzahlen(
   rohEntries: unknown,
   leverage: number | null | undefined,
   direction: string,
-): { totalSize: number; avgEntry: number; margin: number | null; liqPrice: number | null } {
+): {
+  totalSize: number; avgEntry: number; margin: number | null;
+  liqPrice: number | null; anzahl: number;
+} {
   const entries = sicherListe(rohEntries) as { price?: number; size?: number }[];
 
   const totalSize = entries.reduce((s, e) => s + (Number(e.size) || 0), 0);
@@ -275,7 +398,147 @@ function einstiegsKennzahlen(
     ? (direction === 'long' ? avgEntry - (margin / totalSize) : avgEntry + (margin / totalSize))
     : null;
 
-  return { totalSize, avgEntry, margin, liqPrice };
+  return { totalSize, avgEntry, margin, liqPrice, anzahl: entries.length };
+}
+
+/**
+ * Die groessere von zwei Prozentzahlen, als Prozentpunkte.
+ *
+ * Die eigene Rechnung sieht alle Plaene, der RiskGuard nur die der
+ * Engine — aber er allein kennt Verluste, die nicht ueber Plaene
+ * liefen. Die hoehere Zahl ist deshalb die vorsichtigere Auskunft.
+ */
+export function hoechstes(eigeneProzent: number, guardAnteil: number | undefined): number {
+  const vomGuard = (guardAnteil ?? 0) * 100;
+  return Math.max(eigeneProzent, vomGuard);
+}
+
+/**
+ * Das Kapital, auf das sich die Prozentangaben beziehen.
+ *
+ * Im Uebungsbetrieb der Kontostand; sonst das, was als Startkapital
+ * hinterlegt ist. Ohne eine solche Bezugsgroesse laesst sich kein
+ * Verlust in Prozent ausdruecken.
+ */
+export function verwendetesKapital(store: SqliteStore): number {
+  const konto = store.getPaperAccount('USDT');
+  if (konto) {
+    const start = Number(konto.startkapital) || 0;
+    const realisiert = Number(konto.realisiert) || 0;
+    const gebuehren = Number(konto.gebuehren) || 0;
+    const equity = start + realisiert - gebuehren;
+    return equity > 0 ? equity : start;
+  }
+  return 0;
+}
+
+/**
+ * Tages- und Wochenverlust sowie Drawdown — aus den Abschluessen.
+ *
+ * Gerechnet wird aus den tatsaechlich gefuellten Ausstiegs-Orders:
+ * Jede von ihnen hat einen Zeitstempel, und nur sie realisieren etwas.
+ * Die Gebuehren gehen voll ein — gezahlt ist gezahlt.
+ *
+ * Der Drawdown ist der Abstand vom Hoechststand, den das Kapital im
+ * Verlauf erreicht hatte. Er wird aus derselben Folge gebildet: Wer
+ * nur den aktuellen Stand mit dem Startkapital vergleicht, uebersieht
+ * den Ruecksetzer nach einer Gewinnserie.
+ */
+export function risikoKennzahlen(
+  store: SqliteStore,
+  ergebnisService: ErgebnisService,
+  kapital: number,
+): {
+  tagesverlustPct: number; wochenverlustPct: number; drawdownPct: number;
+  kapital: number; realisiertHeute: number; realisiertWoche: number;
+} {
+  const leer = {
+    tagesverlustPct: 0, wochenverlustPct: 0, drawdownPct: 0,
+    kapital, realisiertHeute: 0, realisiertWoche: 0,
+  };
+  if (kapital <= 0) return leer;
+
+  const jetzt = Date.now();
+  const einTag = jetzt - 86_400_000;
+  const eineWoche = jetzt - 7 * 86_400_000;
+
+  // Je Plan den Durchschnittseinstieg — gegen ihn wird jeder Ausstieg
+  // gerechnet.
+  const abschluesse: Array<{ zeit: number; betrag: number }> = [];
+
+  for (const bp of store.getBotTradePlans({})) {
+    const planId = String(bp.id);
+    const orders = store.getPlanOrders(planId);
+    if (orders.length === 0) continue;
+
+    const e = ergebnisService.fuerPlan(
+      planId, bp.direction === 'short' ? 'short' : 'long', Number(bp.leverage) || 1, null,
+    );
+    if (e.einstiegsPreis == null) continue;
+
+    const vorzeichen = bp.direction === 'short' ? -1 : 1;
+
+    for (const o of orders) {
+      const menge = Number(o.filled_quantity) || 0;
+      const preis = Number(o.avg_fill_price) || 0;
+      const gebuehr = Number(o.fees) || 0;
+      const zeit = Date.parse(zeitstempel(o));
+      if (!Number.isFinite(zeit)) continue;
+
+      let betrag = -gebuehr;
+      if (menge > 0 && preis > 0 && AUSSTIEGS_ROLLEN.has(String(o.role))) {
+        betrag += vorzeichen * (preis - e.einstiegsPreis) * menge;
+      }
+      if (betrag !== 0) abschluesse.push({ zeit, betrag });
+    }
+  }
+
+  // Die Trades der TradingEngine kommen dazu — derselbe Kontostand.
+  for (const t of store.getTrades(1000, 0)) {
+    const zeit = Date.parse(String(t.timestamp ?? ''));
+    const betrag = Number(t.pnl) || 0;
+    if (Number.isFinite(zeit) && betrag !== 0) abschluesse.push({ zeit, betrag });
+  }
+
+  abschluesse.sort((a, b) => a.zeit - b.zeit);
+
+  const realisiertHeute = abschluesse
+    .filter(a => a.zeit >= einTag).reduce((s, a) => s + a.betrag, 0);
+  const realisiertWoche = abschluesse
+    .filter(a => a.zeit >= eineWoche).reduce((s, a) => s + a.betrag, 0);
+
+  // Verlauf des Kapitals nachbilden: vom Stand vor allen Abschluessen
+  // bis heute. Der Hoechststand darunter ist der Bezugspunkt.
+  const gesamt = abschluesse.reduce((s, a) => s + a.betrag, 0);
+  let lauf = kapital - gesamt;
+  let hoechststand = lauf;
+  for (const a of abschluesse) {
+    lauf += a.betrag;
+    if (lauf > hoechststand) hoechststand = lauf;
+  }
+
+  const drawdown = hoechststand > 0 ? ((hoechststand - lauf) / hoechststand) * 100 : 0;
+
+  return {
+    // Nur Verluste werden ausgewiesen: Ein Gewinntag ist kein
+    // negativer Verlust, er ist gar keiner.
+    tagesverlustPct: realisiertHeute < 0 ? (-realisiertHeute / kapital) * 100 : 0,
+    wochenverlustPct: realisiertWoche < 0 ? (-realisiertWoche / kapital) * 100 : 0,
+    drawdownPct: Math.max(0, drawdown),
+    kapital,
+    realisiertHeute,
+    realisiertWoche,
+  };
+}
+
+const AUSSTIEGS_ROLLEN = new Set(['take_profit', 'stop_loss', 'trailing_stop']);
+
+/** Wann eine Order wirksam wurde — gefuellt, sonst platziert. */
+function zeitstempel(o: Record<string, unknown>): string {
+  const gefuellt = (Number(o.filled_quantity) || 0) > 0;
+  const roh = String((gefuellt ? (o.updated_at ?? o.placed_at) : o.placed_at) ?? '');
+  // SQLite liefert "YYYY-MM-DD HH:MM:SS" in UTC, ohne Zonenangabe.
+  return roh.includes('T') ? roh : roh.replace(' ', 'T') + 'Z';
 }
 
 /**

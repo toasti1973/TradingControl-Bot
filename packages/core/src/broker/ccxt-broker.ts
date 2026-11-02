@@ -178,6 +178,12 @@ export class CcxtBroker implements BrokerAdapter {
       extraParams['reduceOnly'] = true;
     }
 
+    // Im Hedge-Modus muss dazugesagt werden, WELCHE der beiden
+    // Positionen gemeint ist.
+    if (params.positionSide && this.marketType === 'futures') {
+      Object.assign(extraParams, this.hedgeFeld(params.positionSide));
+    }
+
     const order = await this.exchange.createOrder(
       ccxtSymbol,
       ccxtType,
@@ -188,6 +194,43 @@ export class CcxtBroker implements BrokerAdapter {
     );
 
     return this.toOrderResult(order, params.symbol);
+  }
+
+  /**
+   * Uebersetzt "long" oder "short" in das Feld, das diese Boerse dafuer
+   * kennt.
+   *
+   * Es gibt keinen gemeinsamen Namen: ccxt reicht solche Angaben
+   * unveraendert an die Boerse durch, und jede nennt sie anders.
+   *
+   *   Phemex   posSide      "Long" / "Short"   (One-Way: "Merged")
+   *   Bybit    positionIdx  1 = Long, 2 = Short  (One-Way: 0)
+   *   Binance  positionSide "LONG" / "SHORT"     (One-Way: "BOTH")
+   *   OKX      posSide      "long" / "short"     (One-Way: "net")
+   *
+   * Eine unbekannte Boerse bekommt nichts mitgeschickt. Das ist die
+   * richtige Vorsicht: Ein erfundenes Feld wuerde entweder ignoriert —
+   * dann waere die Order im Netting-Modus und knabberte an der
+   * Gegenposition — oder die Boerse wiese sie ab. Beides faellt
+   * frueher auf als eine stillschweigend falsch gebuchte Order.
+   */
+  private hedgeFeld(seite: 'long' | 'short'): Record<string, unknown> {
+    const id = String(this.exchange.id ?? '').toLowerCase();
+
+    switch (id) {
+      case 'phemex':
+        return { posSide: seite === 'long' ? 'Long' : 'Short' };
+      case 'bybit':
+        return { positionIdx: seite === 'long' ? 1 : 2 };
+      case 'binance':
+      case 'binanceusdm':
+      case 'binancecoinm':
+        return { positionSide: seite === 'long' ? 'LONG' : 'SHORT' };
+      case 'okx':
+        return { posSide: seite };
+      default:
+        return {};
+    }
   }
 
   async cancelOrder(symbol: string, orderId: string): Promise<void> {
@@ -439,13 +482,19 @@ export class CcxtBroker implements BrokerAdapter {
       filledQuantity: filled,
       avgFillPrice: order.average ?? 0,
       timestamp: order.timestamp ?? Date.now(),
+      ...gebuehrAusCcxt(order),
     };
   }
 
   private toPositionInfo(pos: Position, symbol: string): PositionInfo {
     return {
       symbol,
-      side: (pos.side as 'buy' | 'sell') ?? (((pos.contracts ?? 0) > 0) ? 'buy' : 'sell'),
+      // ccxt fuehrt die Richtung als 'long' | 'short', nicht als
+      // 'buy' | 'sell'. Die Werte hier ungeprueft durchzureichen war
+      // gefaehrlich: `pos.side === 'buy'` ist bei einem Long IMMER
+      // falsch, und closePosition() leitete daraus einen Kauf ab — die
+      // Position waere verdoppelt statt geschlossen worden.
+      side: seiteAusCcxt(pos.side, pos.contracts),
       size: Math.abs(pos.contracts ?? 0),
       entryPrice: pos.entryPrice ?? 0,
       unrealizedPnl: pos.unrealizedPnl ?? 0,
@@ -468,4 +517,66 @@ export class BrokerKonfigurationsError extends Error {
     super(message);
     this.name = 'BrokerKonfigurationsError';
   }
+}
+
+/**
+ * Uebersetzt die Richtungsangabe einer ccxt-Position.
+ *
+ * ccxt fuehrt sie als 'long' | 'short'; die Schnittstelle dieses Bots
+ * als 'buy' | 'sell'. Fehlt die Angabe, entscheidet das Vorzeichen der
+ * Kontraktzahl — negative Kontrakte sind ein Short.
+ *
+ * Die Verwechslung war real folgenschwer: 'long' === 'buy' ist nie
+ * wahr, also galt JEDE Position als Short. `closePosition()` leitete
+ * daraus einen Kauf ab und haette einen Long verdoppelt statt ihn zu
+ * schliessen.
+ */
+function seiteAusCcxt(seite: unknown, kontrakte: number | undefined): 'buy' | 'sell' {
+  const text = String(seite ?? '').toLowerCase();
+  if (text === 'long' || text === 'buy') return 'buy';
+  if (text === 'short' || text === 'sell') return 'sell';
+  return (kontrakte ?? 0) < 0 ? 'sell' : 'buy';
+}
+
+/**
+ * Liest die Gebuehr aus einer ccxt-Order.
+ *
+ * Ohne sie steht in der Ergebnisrechnung je Plan eine Null, waehrend
+ * die Boerse sehr wohl abgerechnet hat — jeder Trade saehe besser aus,
+ * als er war. Beim Beurteilen eines Signalgebers ist das keine
+ * Kleinigkeit: Bei engen Zielen entscheidet die Gebuehr darueber, ob
+ * ein Trade im Plus endete.
+ *
+ * ccxt fuehrt sie an zwei Stellen — `fee` fuer eine einzelne und
+ * `fees` fuer mehrere Teilabrechnungen. Beide werden gelesen; die
+ * Teilabrechnungen gewinnen, wenn es sie gibt, denn sie sind
+ * vollstaendiger.
+ */
+function gebuehrAusCcxt(order: Order): { fees?: number; feeCurrency?: string } {
+  const einzeln = order.fee;
+
+  // `fees` steht nicht in den ccxt-Typen, wird von vielen Boersen aber
+  // geliefert — daher der Umweg ueber eine eigene Beschreibung.
+  const roh = (order as unknown as {
+    fees?: Array<{ cost?: number | string; currency?: string }>;
+  }).fees;
+  const mehrere = Array.isArray(roh) ? roh : [];
+
+  if (mehrere.length > 0) {
+    const summe = mehrere.reduce((s, f) => s + (Number(f?.cost) || 0), 0);
+    if (summe > 0) {
+      return { fees: summe, feeCurrency: mehrere[0]?.currency ?? einzeln?.currency };
+    }
+  }
+
+  const betrag = Number(einzeln?.cost);
+  if (Number.isFinite(betrag) && betrag !== 0) {
+    // Manche Boersen melden eine Gutschrift (Maker-Rabatt) als
+    // negative Gebuehr. Der Betrag wird so uebernommen, wie er kommt —
+    // die Ergebnisrechnung zieht ihn ab, und ein negativer Abzug ist
+    // eine Gutschrift.
+    return { fees: betrag, feeCurrency: einzeln?.currency };
+  }
+
+  return {};
 }

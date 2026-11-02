@@ -177,7 +177,10 @@ export function createTradePlansRouter(
         stornierteOrders: ergebnis.stornierteOrders,
         ergebnis: ergebnisService.fuerPlan(
           id,
-          plan.direction as 'long' | 'short',
+          // Normalisiert wie in dashboard.ts, plans.ts und trades.ts —
+          // ein ungeprueftes `as` liesse einen abweichenden Wert
+          // durch, und das Vorzeichen haengt daran.
+          plan.direction === 'short' ? 'short' : 'long',
           Number(plan.leverage) || 1,
           monitor.getState(id)?.lastPrice ?? null,
         ),
@@ -241,6 +244,7 @@ export function createTradePlansRouter(
       trailingBestPrice: s.trailingBestPrice,
       remainingSize: s.remainingSize,
       lastPrice: s.lastPrice,
+      lastPriceAt: s.lastPriceAt,
       tpsTriggered: s.tpState.filter(t => t.triggered).length,
       tpsTotal: s.tpState.length,
       errorCount: s.errorCount,
@@ -273,7 +277,15 @@ export function createTradePlansRouter(
       intervall,
       ...ergebnis,
       // Die Marken fuer den Chart: Wo lagen Einstiege, Ziele und Stop?
-      marken: planMarken(plan),
+      //
+      // Der Monitor kommt mit: Sein Stop ist der GELTENDE, und der
+      // wandert — nach einem Take-Profit nachgezogen oder als
+      // Trailing mitlaufend.
+      marken: planMarken(plan, monitor.getState(req.params.id!)),
+      // Und wo tatsaechlich gehandelt wurde — mit Zeitpunkt.
+      fuellungen: planFuellungen(store, String(plan.id)),
+      // Wann das Signal eintraf und wie der Markt da stand.
+      signalzeit: signalLage(plan),
     });
   });
 
@@ -295,7 +307,7 @@ export function createTradePlansRouter(
     // fehlt er, bleibt nur das realisierte stehen.
     const ergebnis = ergebnisService.fuerPlan(
       req.params.id!,
-      plan.direction as 'long' | 'short',
+      plan.direction === 'short' ? 'short' : 'long',
       Number(plan.leverage) || 1,
       monitorState?.lastPrice ?? null,
     );
@@ -344,15 +356,100 @@ function deserializePlan(row: Record<string, unknown>) {
 }
 
 /**
+ * Wann das Signal eintraf — und wie der Markt da stand.
+ *
+ * Erst diese Marke beantwortet die Frage, die aus den Kerzen allein
+ * nicht hervorgeht: War der Kurs VOR oder NACH dem Signal in den
+ * Einstiegen?
+ *
+ * Am 26.10. lag ein BTCUSDT-Short 13 Minuten daneben. Der Chart zeigte
+ * Kerzen weit ueber dem ersten Einstieg, und es sah aus, als haette
+ * der Bot sie verschlafen — tatsaechlich kam das Signal erst, als der
+ * Kurs schon wieder gefallen war. Ohne senkrechte Marke ist das nicht
+ * zu sehen.
+ */
+export function signalLage(plan: Record<string, unknown>): {
+  zeitpunkt: string;
+  kurs: number | null;
+  abstandPct: number | null;
+  ausserhalb: boolean;
+} | null {
+  const roh = plan.signal_origin;
+  if (!roh) return null;
+
+  let herkunft: {
+    received_at?: string; emitted_at?: string;
+    marktlage?: { kurs?: number; abstandPct?: number; ausserhalb?: boolean };
+  };
+  try {
+    herkunft = typeof roh === 'string' ? JSON.parse(roh) : roh as typeof herkunft;
+  } catch {
+    return null;
+  }
+
+  const zeitpunkt = herkunft.received_at ?? herkunft.emitted_at;
+  if (!zeitpunkt) return null;
+
+  const lage = herkunft.marktlage;
+  return {
+    zeitpunkt,
+    kurs: lage?.kurs ?? null,
+    abstandPct: lage?.abstandPct ?? null,
+    ausserhalb: lage?.ausserhalb === true,
+  };
+}
+
+/**
+ * Die tatsaechlichen Fuellungen eines Plans — mit Zeitpunkt.
+ *
+ * Die Preismarken sagen, wo etwas GEPLANT war; diese Liste sagt, wo
+ * und WANN wirklich gehandelt wurde. Erst zusammen ergibt der Chart
+ * die ganze Geschichte: Ein Einstieg, der zwei Cent ueber seinem
+ * Limit fuellte, ein Stop, der einen Docht tiefer griff.
+ */
+export function planFuellungen(store: SqliteStore, planId: string): Array<{
+  art: string; preis: number; menge: number; zeitpunkt: string; beschriftung: string;
+}> {
+  const nummer: Record<string, number> = {};
+
+  return store.getPlanOrders(planId)
+    .filter(o => (Number(o.filled_quantity) || 0) > 0 && (Number(o.avg_fill_price) || 0) > 0)
+    .map(o => {
+      const rolle = String(o.role);
+      nummer[rolle] = (nummer[rolle] ?? 0) + 1;
+
+      const kurz = rolle === 'entry' ? 'E'
+        : rolle === 'take_profit' ? 'TP'
+        : rolle === 'trailing_stop' ? 'TS' : 'SL';
+
+      // SQLite liefert UTC ohne Zonenangabe — ohne das angehaengte Z
+      // laese der Browser die Zeit als Ortszeit, und die Marke saesse
+      // im Chart um den Zonenversatz daneben.
+      const roh = String(o.updated_at ?? o.placed_at ?? '');
+      const zeitpunkt = roh.includes('T') ? roh : roh.replace(' ', 'T') + 'Z';
+
+      return {
+        art: rolle === 'entry' ? 'einstieg' : rolle === 'take_profit' ? 'tp' : 'sl',
+        preis: Number(o.avg_fill_price),
+        menge: Number(o.filled_quantity),
+        zeitpunkt,
+        beschriftung: kurz + nummer[rolle],
+      };
+    });
+}
+
+/**
  * Preismarken eines Plans fuer die Chart-Darstellung.
  *
  * Einstiege, Take-Profits und Stop-Loss als waagerechte Linien — erst
  * damit laesst sich im Chart ablesen, ob ein Docht den Stop beruehrt hat
  * oder knapp darueber drehte.
  */
-function planMarken(plan: Record<string, unknown>): Array<{
-  art: string; preis: number; beschriftung: string;
-}> {
+export function planMarken(
+  plan: Record<string, unknown>,
+  /** Der Monitor-Zustand, soweit der Plan ueberwacht wird. */
+  stand?: { slCurrent?: number | null; trailingActive?: boolean } | null,
+): Array<{ art: string; preis: number; beschriftung: string }> {
   const marken: Array<{ art: string; preis: number; beschriftung: string }> = [];
 
   const liste = (feld: unknown): unknown[] => {
@@ -380,9 +477,31 @@ function planMarken(plan: Record<string, unknown>): Array<{
     }
   });
 
-  const sl = Number(plan.stop_loss_price);
-  if (Number.isFinite(sl) && sl > 0) {
-    marken.push({ art: 'sl', preis: sl, beschriftung: 'SL' });
+  // Der Stop — und zwar der GELTENDE, nicht der geplante.
+  //
+  // Er wandert: nach einem Take-Profit nachgezogen, als Trailing
+  // mitlaufend. Hier stand lange `plan.stop_loss_price`, der
+  // urspruengliche Wert aus dem Signal. Am 26.10. zeigte die Kachel
+  // 737,61 und der Chart 733,03 — zwei Zahlen fuer dieselbe Sache,
+  // und die im Chart war die laengst ueberholte.
+  const geplant = Number(plan.stop_loss_price);
+  const geltend = Number(stand?.slCurrent);
+  const aktuell = Number.isFinite(geltend) && geltend > 0 ? geltend : geplant;
+
+  if (Number.isFinite(aktuell) && aktuell > 0) {
+    marken.push({
+      art: 'sl',
+      preis: aktuell,
+      beschriftung: stand?.trailingActive ? 'SL ↗' : 'SL',
+    });
+  }
+
+  // Ist er gewandert, bleibt der urspruengliche als blasse Marke
+  // stehen: Erst der Vergleich zeigt, wieviel Luft der Trade
+  // gewonnen hat.
+  if (Number.isFinite(geplant) && geplant > 0 &&
+      Number.isFinite(aktuell) && Math.abs(aktuell - geplant) > 1e-9) {
+    marken.push({ art: 'sl_alt', preis: geplant, beschriftung: 'SL ursprünglich' });
   }
 
   return marken;
