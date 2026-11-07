@@ -156,6 +156,83 @@ meinten.
 Tests: `packages/core/src/broker/paper-account.test.ts`, Abschnitt
 „Hedge-Modus".
 
+### 3af. Der Bot managt die Position, nicht das Journal
+
+Sobald der erste Einstieg gefüllt ist, führt **allein der Bot** die
+Position. TC plant; der Bot handelt und passt an.
+
+Drei Angaben am Take-Profit entscheiden über die Menge, in dieser
+Rangfolge:
+
+| | Bedeutung |
+|---|---|
+| `size` | feste Menge — gilt, wie sie dasteht |
+| `percentage` + `size_basis: 'rest'` | Anteil dessen, was vor diesem Ziel noch offen wäre |
+| `percentage` (Vorgabe) | Anteil der **gesamten eingestiegenen** Menge |
+
+Vier Ziele zu je 25 % auf 100 Einheiten:
+
+| | `eingestiegen` | `rest` |
+|---|---|---|
+| TP1 | 25 | 25 |
+| TP2 | 25 | 18,75 |
+| TP3 | 25 | 14,06 |
+| TP4 | 25 | 10,55 |
+| **bleibt** | **0** | **31,64** |
+
+Mit `eingestiegen` schließt die Staffel die Position; mit `rest`
+bleibt ein Rest für die lange Bewegung stehen. Ohne Angabe gilt
+`eingestiegen` — ein alter Plan ändert durch das Update sein
+Verhalten nicht.
+
+**Bezug ist die tatsächlich gefüllte Menge, nicht die geplante.** Sie
+wächst mit jedem weiteren Einstieg, und die liegenden Ziel-Orders
+wachsen mit: `synchronisiereTpOrders()` nimmt die alte zurück und
+legt die größere neu. Genau das ist das aktive Positionsmanagement —
+ohne es schlösse ein 25-%-Ziel ein Viertel einer Position, die es nie
+gab.
+
+Bei `rest` zählt der Stand **vor** diesem Ziel, nicht der aktuelle.
+Sonst hinge die Menge davon ab, wann der Bot zufällig nachsieht, und
+die liegende Order flatterte mit jedem Durchlauf.
+
+**Der Stop schließt immer vollständig.** Er wandert zwar (nach einem
+Ziel, als Trailing), aber er teilt nicht. Der Trailing-Stop reizt den
+letzten Rest bis zum Ende aus — und wenn er greift, geht die gesamte
+verbliebene Position.
+
+`trailing_stop_size_pct` aus dem Journal (Migration 074) wird deshalb
+**bewusst nicht ausgewertet**: Ein Stop, der nur einen Teil schließt,
+ließe den Rest ohne Absicherung stehen. Damit das kein stilles
+Übergehen bleibt, meldet `warneVorTeilTrailing()` es beim Anmelden —
+eine Zahl, die im Journal steht und nichts bewirkt, wäre sonst eine
+Falle.
+
+Ziele mit `trigger` kommen **nicht** ins Orderbuch: Die Börse kennt
+keinen RSI. Sie laufen über die Kursbeobachtung, und der Indikator
+wird im Augenblick des Treffers geprüft.
+
+**`first_market_rest_limit` eröffnet sofort.** Der erste Einstieg geht
+als Market-Order hinaus, ohne auf einen Preis zu warten — genau dafür
+wählt man den Modus. Hier stand eine Preisprüfung: Die Market-Order
+kam erst, wenn der Kurs den geplanten Einstieg berührte. Damit war sie
+ein schlechteres Limit — dieselbe Wartezeit, aber Taker-Gebühr statt
+Maker und ohne die Sicherheit einer liegenden Order.
+
+Die Schranke dagegen misst am **Risiko**, nicht am Preis: Wie weit ist
+der Weg zum Stop gewachsen? Bei Einstieg 99 und Stop 90 sind das
+9 Punkte; bis 25 % mehr (Kurs 101,25) wird eröffnet, darüber abgelehnt
+und begründet. Ein Prozent vom Kurs wäre das falsche Maß — bei einem
+engen Stop zu viel, bei einem weiten zu wenig, und bei gestaffelten
+Einstiegen liegt schon der erste regelmäßig ein bis zwei Prozent vom
+Markt entfernt. Ohne Stop im Plan greift ersatzweise eine
+Preisschranke von 2 %.
+
+`trailing_stop_activation` nennt den Kurs, ab dem das Trailing
+überhaupt läuft. Vorher behält der Trade seinen festen Stop.
+
+Tests: `packages/docker-bot/src/services/tp-bezug.test.ts`.
+
 ### 3b. Nach dem ersten Take-Profit wird nicht mehr nachgekauft
 
 Sobald ein Take-Profit gegriffen hat, ist die Einstiegsphase vorbei:
@@ -288,6 +365,259 @@ weiß nichts von erreichten Zielen.
 
 Tests: `packages/docker-bot/src/services/stop-break-even.test.ts`,
 Abschnitt „Alle Ziele erreicht".
+
+### 3acf. Der Kurs kommt über WebSocket, REST trägt den Rest
+
+`KursStrom` liest den laufenden Kurs über WebSocket. `getPrice()`
+nimmt ihn, solange er jünger als `STROM_HOECHSTALTER_MS` (15 s) ist,
+und fragt sonst per REST. Das Abonnement entsteht bei der ersten
+Abfrage von selbst — welche Symbole gebraucht werden, weiß nur der
+Plan.
+
+**Gelesen werden beide Kanäle gleichzeitig**, `watchTrades` und
+`watchTicker`, und beide speisen dieselbe Spanne. Gemessen an Phemex
+über 60 Sekunden:
+
+| Symbol | Trades | Ticker |
+|---|---|---|
+| BTC/USDT:USDT | 10 Handel, Spanne 28,10 | 20 Meldungen, Spanne 48,90 |
+| SOL/USDT:USDT | 5 Handel, Spanne 0,02 | 20 Meldungen, Spanne 0,05 |
+
+Der Trade-Strom dieser Kontrakte ist dünn; der Ticker kommt dafür
+verlässlich alle drei Sekunden. Keiner ist verlässlich der feinere,
+deshalb laufen beide.
+
+**Was der Umbau bringt** — 60 s BTC, Abfragen im Zwei-Sekunden-Takt
+wie im Monitor:
+
+| | REST | Strom |
+|---|---|---|
+| Antwortzeit | **2.321 ms** | 1 ms |
+| gesehene Spanne | 37,30 | 37,40 |
+
+Die Spanne gewann 0,10 Punkte — fast nichts. **Der Gewinn steht in
+der ersten Zeile:** Die REST-Abfrage dauerte länger als der Takt, in
+dem sie gestellt wurde. Der tatsächliche Blindfleck war nie zwei
+Sekunden, sondern über vier.
+
+`spanneSeitAbfrage()` gibt Hoch und Tief seit der letzten Abfrage und
+setzt sie dabei zurück — **genau einmal je Durchlauf abfragen**, ein
+zweiter Aufruf bekommt eine leere. Benutzt wird sie allein vom
+Trailing-Stop (`updateTrailingStop`), und dort nur das Extrem in
+Gewinnrichtung: beim Long das Hoch, beim Short das Tief. Dasselbe
+Einbahnprinzip wie bei jeder Stop-Verschiebung.
+
+Das Gegen-Extrem bleibt bewusst unbenutzt. Es gegen den Stop zu
+prüfen hieße, einen Docht nachträglich als Treffer zu buchen, den die
+Börse — bei der die Order wirklich liegt — vielleicht nie gesehen hat.
+
+**Drei Siebe halten Unbrauchbares aus der Spanne:**
+
+| Sieb | wogegen |
+|---|---|
+| `abZeit` | der erste `watchTrades`-Aufruf liefert den ganzen Zwischenspeicher — gemessen 1.000 Handel über 45 Minuten |
+| `letzterTradeTs` + `gesehenAufLetzterMs` | derselbe Handel zweimal, ohne die zu verlieren, die sich die Millisekunde teilen |
+| Zeitstempel fehlt | ohne Zeit greift kein Sieb; so ein Handel käme bei jedem Aufruf erneut durch |
+
+Ein zu alter Kurs wird **nie** als aktueller ausgegeben — lieber
+`null` und REST. Ein stehengebliebener Kurs sieht aus wie eine
+Tatsache und ist eine Erinnerung.
+
+Tests: `packages/core/src/broker/kurs-strom.test.ts`,
+`packages/docker-bot/src/services/trailing-strom.test.ts`.
+
+### 3ag. Ohne bestätigten Hebel wird nicht eingestiegen
+
+`setLeverage` scheitert → **keine Order**. Der nächste Durchlauf
+versucht es erneut.
+
+**Warum:** Hier stand `.catch(() => warn('fahre fort'))`. Das hieß
+handeln mit unbekanntem Hebel — und der Hebel bestimmt zusammen mit
+dem Stop, wo die Liquidation liegt.
+
+BTCUSDT am 05.11.2026, 17:10: `setLeverage` scheiterte an Phemex mit
+`TE_ERR_INCONSISTENT_POS_MODE`, der Bot fuhr fort, Phemex nahm seine
+Voreinstellung.
+
+| | geplant | tatsächlich |
+|---|---|---|
+| Hebel | 4 | **20** |
+| Margin für 0,0522 BTC | 994,89 USDT | 198,98 USDT |
+| Liquidation (grob) | ~57.000 | **~72.400** |
+
+Der geplante Stop lag bei 74.400 — nur noch 2.000 Punkte vor der
+Liquidation statt 17.000. Und die Positionsgröße war auf Hebel 4
+gerechnet.
+
+Tests: `packages/docker-bot/src/services/einstieg-sperren.test.ts`.
+
+### 3ah. Der Positionsmodus wird gefragt, nicht angenommen
+
+Eine Börse führt Positionen je Symbol (One-Way) oder je Symbol **und**
+Richtung (Hedge). Welcher Modus gilt, entscheidet, welche Felder an
+jede Order, an `setLeverage` und an `cancelOrder` müssen — die falsche
+Form wird **abgewiesen**, nicht ignoriert.
+
+**Der Modus wird je Symbol geführt**, nicht je Börse. Phemex stellt
+ihn pro Symbol ein (`PUT /g-positions/switch-pos-mode-sync?symbol=…`);
+ein Konto kann BTCUSDT im Hedge-Modus und ETHUSDT im One-Way-Modus
+halten. Ein gemeinsamer Merker wäre für das eine richtig und für das
+andere falsch.
+
+`ermittlePosModus()` fragt in dieser Reihenfolge:
+
+| Weg | Lage |
+|---|---|
+| `fetchPositionMode` | der vorgesehene — bei Phemex **nicht implementiert**, die ccxt-Basisklasse wirft `NotSupported` |
+| `fetchPositions` | der tragende. ccxt liest `posMode` und setzt daraus `hedged` (`parsePosition`); Endpunkt `GET /g-accounts/accountPositions` |
+
+Schweigen beide, **lernt `mitModus()` aus dem Fehler**: Bei einem
+Modusfehler wird einmal in der anderen Form wiederholt und der Modus
+nach dem Erfolg gemerkt.
+
+**Warum der Vorabruf lohnt:** Ohne ihn geht die erste Order jeder
+Sitzung bei einem Hedge-Konto mit `posSide: "Merged"` hinaus, wird
+abgewiesen, und erst der zweite Versuch trägt. Das kostet eine
+Rundreise — und im unglücklichsten Fall ist es die Stop-Order zu einer
+gerade gefüllten Position.
+
+Der Lernweg bleibt trotzdem: Ein Symbol kann im Betrieb umgestellt
+werden, und dann irrt die einmal gemerkte Auskunft.
+
+`GET /api/handelsplaetze/positionsmodus?exchange=…&symbol=…` fragt den
+Modus **rein lesend** ab. Zwei Gründe: Er entscheidet über jede Order,
+jeden Hebel und jedes Storno und gehört deshalb sichtbar — und ohne
+diesen Weg ließe sich die Vorab-Abfrage nur prüfen, indem man einen
+echten Plan startet.
+
+**Genau einmal wiederholen.** Es gibt zwei Formen; werden beide
+abgewiesen, ist der Positionsmodus nicht die Ursache. Gemerkt wird
+erst **nach** dem Erfolg — sonst wäre es eine falsche Lehre.
+
+Die Sammelwerte des One-Way-Modus stehen in derselben Tabelle wie die
+Hedge-Werte (`hedgeFeld`): Phemex `Merged`, Bybit `0`, Binance `BOTH`,
+OKX `net`. Ein fehlendes Feld und ein Feld mit Sammelwert sind für die
+Börse **nicht** dasselbe.
+
+**Jeder Aufruf braucht seine eigene Form:**
+
+| Aufruf | im Hedge-Modus |
+|---|---|
+| `setLeverage` | `{ hedged: true }` — ccxt schickt dann `longLeverageRr`/`shortLeverageRr` statt `leverageRr` |
+| `placeOrder` | `posSide` o. ä. über `hedgeFeld()` |
+| `cancelOrder` | **`posSide`** — `hedged` genügt hier nicht |
+
+Der letzte Punkt kostete einen Fehlversuch: ccxt wertet `hedged` nur
+in `setLeverage` aus und setzt beim Stornieren von sich aus
+`posSide: "Merged"`. Deshalb nimmt `cancelOrder` jetzt die
+Positionsrichtung entgegen, und der Monitor gibt `plan.direction` mit.
+
+Beim Einstieg wird die Richtung **erschlossen**, wenn der Plan keine
+nennt: Ein Kauf eröffnet einen Long. Bei `reduceOnly` nicht — dort ist
+sie nicht eindeutig, und zu raten hieße, die Gegenposition anzufassen.
+
+Tests: `packages/core/src/broker/ccxt-hedge.test.ts`.
+
+### 3ak. Eine Stop-Order braucht Richtung und Ausführungsart
+
+Zwei Felder, die der Übungsbroker nicht braucht und die deshalb erst
+auffielen, als gegen die offizielle Phemex-Dokumentation geprüft wurde
+(07.11.2026). **Beide hatten noch nie eine echte Börse erreicht** — am
+05.11. gingen nur zwei Einstiege an Phemex, nie ein Stop.
+
+**1. `triggerDirection` ist Pflicht.** Ohne das Feld wirft ccxt
+`ArgumentsRequired`, und die Order verlässt den Bot nicht einmal:
+
+```
+createOrder(..., { stopPrice: 70000, reduceOnly: true })
+  → ArgumentsRequired: phemex createOrder() also requires a
+    'triggerDirection' parameter
+```
+
+Die Seite bestimmt die Richtung — ein Verkauf löst bei fallendem Kurs
+aus, ein Kauf bei steigendem:
+
+| Zweck | Seite | Richtung |
+|---|---|---|
+| Stop-Loss auf einen Long | sell | `descending` |
+| Stop-Loss auf einen Short | buy | `ascending` |
+| Ausbruchskauf | buy | `ascending` |
+| Ausbruchsverkauf | sell | `descending` |
+
+Genau diese Paarung ergibt bei ccxt `ordType: Stop`. Vertauscht ergäbe
+sie `MarketIfTouched` — eine Order, die in **Gewinn**richtung auslöst.
+Die braucht der Bot nicht: Take-Profits liegen als gewöhnliche
+Limit-Orders im Buch (Regel 3aa).
+
+Den Kurs zu vergleichen wäre die naheliegende Alternative, ist aber
+schlechter: Liegt er gerade am Stop, kippt die Richtung je nach
+Augenblick der Abfrage.
+
+**2. `type` ist die Ausführungsart, nicht der Auslöser.** Dass eine
+Order eine Trigger-Order ist, sagt allein `stopPrice`. `mapOrderTypeToCcxt`
+reichte `'stop'` unverändert durch; ccxt schreibt den Wert groß und
+vergleicht gegen `'Market'`. Gemessen an `BTC/USDT:USDT`, abgefangen
+vor dem Absenden:
+
+| übergeben | Phemex `ordType` | `priceRp` |
+|---|---|---|
+| `'stop'` | `StopLimit` | **fehlt** |
+| `'market'` | `Stop` | — |
+| `'limit'` | `StopLimit` | gesetzt |
+
+Der Stop-Loss ist eine Stop-**Market**-Order: Wenn er fällt, soll
+geschlossen werden, nicht auf einen Preis gewartet. Mit `StopLimit`
+ohne Limitpreis hätte Phemex sie abgewiesen oder mit Preis 0 angelegt.
+Jetzt gilt `'stop' → 'market'` und `'stop_limit' → 'limit'`.
+
+Tests: `packages/core/src/broker/ccxt-stop-order.test.ts` — sie prüfen
+gegen die **echte** ccxt-Phemex-Klasse und fangen den Auftrag erst
+unmittelbar vor dem Absenden ab. Nur so prüfen sie die wirkliche
+Übersetzung und nicht unsere Vorstellung davon.
+
+### 3ai. Eine Order, die es nicht gibt, ist zurückgenommen
+
+`cancelOrder` verbucht `OrderNotFound` als **Erfolg**.
+
+**Warum:** Das Ziel des Aufrufs ist, dass die Order nicht mehr an der
+Börse liegt — und genau das ist der Fall. Als Fehler behandelt, hängt
+der Aufrufer fest: Der Monitor vermerkt die Order nicht als storniert
+und versucht es bei jedem Durchlauf erneut, alle zwei Sekunden, ohne
+je weiterzukommen.
+
+Die Fälle sind alle harmlos: von Hand gelöscht, schon gefüllt, oder
+ein früherer Versuch hatte Erfolg und nur die Rückmeldung ging
+verloren.
+
+Erkannt wird am ccxt-Typ **und** am Fehlertext (`OM_ORDER_NOT_FOUND`
+bei Phemex, „unknown order", „order does not exist") — nicht jede
+Börse lässt sich von ccxt zu `OrderNotFound` einordnen.
+
+### 3aj. Ein Plan gehört zu einem Konto
+
+Hat ein Plan Orders auf einem anderen Broker, wird **nicht**
+eingestiegen. `fremderBroker()` prüft das vor jedem Einstieg, vor dem
+Hebel.
+
+**Warum:** Am 05.11.2026 lief ein TC-Plan zuerst im Übungsbetrieb —
+Einstieg gefüllt, Stop gelaufen, Plan `completed`. Zwei Minuten später
+wurde Phemex auf echten Handel umgestellt, und **derselbe** Plan
+schickte zwei Einstiege an die echte Börse. Ohne TP, ohne SL: Der
+Monitor führte ihn ja als fertig.
+
+`offenePositionVon()` nimmt deshalb einen Broker-Filter. Eine Füllung
+beim Übungsbroker und eine an der echten Börse betreffen zwei Konten;
+zusammengezählt ergeben sie eine Zahl, die es nirgends gibt. Beim
+Vorfall hoben sich Übungs-Einstieg und Übungs-Stop auf — der Plan galt
+als fertig, während zwei echte Kauf-Limits lagen.
+
+Eine Order **ohne** Broker-Vermerk ist eine Altlast, kein fremdes
+Konto. Sie zu einem Grund zu machen, ließe bestehende Pläne nach dem
+Update nicht mehr handeln.
+
+Wer von Übung auf Echthandel umstellt, fange einen neuen Plan an.
+
+Tests: `packages/docker-bot/src/services/einstieg-sperren.test.ts`.
 
 ### 3ad. TC-Synaptrix darf den Stop nachkorrigieren — nur enger
 
@@ -481,31 +811,92 @@ gehört regelmäßig geprüft — und das Gegenstück im Journal
 (`backend/src/modules/exchange-sync/adapters/ccxt-exchange-configs.ts`)
 mit.
 
-### 5a. `NUR_UEBUNGSBETRIEB` ist der Riegel gegen echten Handel
+### 5a. Jede Börse entscheidet selbst, ob sie übt
 
-Steht er auf `true`, verlässt **kein** Auftrag den Bot. Jede Börse wird
-auf den Übungsbroker umgeleitet — auch eine mit hinterlegten
-Zugangsdaten, und auch dann, wenn ein Handelssignal von außen
-ausdrücklich eine Börse nennt.
+Bis zum 03.11.2026 entschied ein einziger Schalter über echten Handel:
+`NUR_UEBUNGSBETRIEB`. Stand er, verließ **kein** Auftrag den Bot —
+gleich welche Börse ein Plan nannte.
 
-Der Riegel sitzt in `createBroker()`
-(`docker-bot/src/services/broker-factory.ts`), der einzigen Stelle, an
-der ein Börsenzugang entsteht. Darauf zu bauen, dass keine
-Zugangsdaten hinterlegt sind, wäre zu wenig: Ein Plan nennt seine Börse
-selbst, und ein Signal bringt das Feld `exchange` mit.
+Jetzt trägt jede Börse ihre eigene Einstellung
+(`boersen_einstellung.uebungsbetrieb`). Damit lassen sich Signalquellen
+auf verschiedenen Börsen handeln, von denen die eine übt und die andere
+nicht.
 
-`TradePlanMonitor` bekommt die Einstellung ebenfalls — `exchangeOf()`
-liefert dann `paper`. Sonst prüfte der Monitor weiter gegen die Börse
-aus dem Plan, und ein Signal auf eine nicht MiCA-zugelassene Börse
-scheiterte an einer Zulassung, die für einen Handel nötig wäre, der gar
-nicht stattfindet.
+**Damit ist der eine Hebel entfallen, der im Zweifel alles stilllegte.**
+An seine Stelle tritt die Vorgabe, und sie ist jetzt die tragende
+Sicherung:
 
-Beim Start steht `*** NUR UEBUNGSBETRIEB ***` als Warnung im Protokoll.
-Ein stiller Riegel wäre keiner.
+> Was nicht ausdrücklich und vollständig auf echten Handel gestellt ist,
+> übt.
 
-Tests: `packages/docker-bot/src/services/broker-factory.test.ts` — sie
-prüfen ausdrücklich den gefährlichen Fall: hinterlegte Zugangsdaten und
-trotzdem kein echter Zugang.
+`SqliteStore.boerseUebt()` setzt das um. Jeder dieser Fälle ergibt
+„übt":
+
+| Fall | warum er vorkommt |
+|---|---|
+| Börse nicht eingetragen | ein Plan nennt eine Börse, die niemand eingerichtet hat |
+| Eintrag unvollständig | von Hand in der Datenbank geändert |
+| Wert ist nicht die glatte `0` | verrutschter Wert, Text statt Zahl |
+| Datenbank nicht lesbar | Störung im Betrieb |
+| Börse ist `paper` | immer, ohne Ausnahme |
+
+Nur eine Zeile mit `uebungsbetrieb = 0` lässt echten Handel zu.
+
+**Die Einbahn zieht sich durch alle Schichten.** `createBroker()` nimmt
+`uebtDieseBoerse` entgegen und übt ohne diese Angabe.
+`BrokerRegistry.uebt()` antwortet „ja", wenn kein Auskunftgeber
+hinterlegt ist. `TradePlanMonitor.uebtBoerse()` tut dasselbe, wenn die
+Registry die Methode nicht kennt. Jede Stelle, die die Frage nicht
+beantworten kann, beantwortet sie sicher.
+
+`NUR_UEBUNGSBETRIEB` bleibt als **Rückfall** bestehen und übersteuert
+weiterhin alles. Eine bestehende Einrichtung, die ihn gesetzt hat, soll
+durch das Update nicht plötzlich echt handeln.
+
+**Das Einschalten verlangt eine ausdrückliche Bestätigung.** Die Route
+`PUT /api/handelsplaetze/boersen/:exchange` weist echten Handel ohne
+`bestaetigung: true` ab — und ebenso, wenn für die Börse keine
+Zugangsdaten hinterlegt sind. Der Wechsel steht als Warnung im
+Protokoll; ein stiller Wechsel wäre keiner, den jemand bemerkt.
+
+Tests: `packages/docker-bot/src/services/handelsplaetze.test.ts` —
+sie prüfen vorrangig die Fälle, in denen die Einrichtung
+unvollständig, falsch oder gar nicht vorhanden ist.
+`broker-factory.test.ts` prüft den gefährlichen Fall: hinterlegte
+Zugangsdaten und trotzdem kein echter Zugang.
+
+### 5b. Jede Signalquelle hat ihre Börse
+
+`source` in `bot_trade_plans` unterscheidet nur `tc`, `local` und
+`signal`. Das genügt nicht: Synaptrix und TradingView kommen beide als
+`signal` an, sollen aber auf verschiedenen Börsen handeln können.
+
+Die Tabelle `signalquelle` ordnet zu — über den Strategienamen, den
+Webhook-Pfad oder die Herkunft:
+
+| `art` | verglichen wird mit |
+|---|---|
+| `strategie` | dem Feld `strategy` des Signals |
+| `pfad` | dem Webhook-Pfad, unter dem es eintraf |
+| `quelle` | der Herkunft selbst (`tc`, `local`) |
+
+`rang` entscheidet bei mehreren Treffern — kleiner gewinnt. So lässt
+sich „MBCMA* → Phemex" (Rang 10) vor „* → Bybit" (Rang 90) stellen,
+ohne auf die Reihenfolge der Einträge zu achten.
+
+**Der Mustervergleich kennt nur Gleichheit und ein Sternchen am Ende.**
+Keine regulären Ausdrücke: Ein Muster aus der Oberfläche landet
+ungeprüft in der Auswertung, und ein unglücklicher Ausdruck könnte den
+Signaleingang bei jedem Treffer beschäftigen.
+
+**Die Zuordnung schlägt das Feld `exchange` im Signal.** Sie ist die
+Entscheidung des Nutzers; das Feld im Signal ist die Meinung des
+Absenders — und ein Signalgeber soll nicht bestimmen, wo gehandelt
+wird.
+
+Eine zugeordnete Börse sagt **nichts** darüber, ob dort echt gehandelt
+wird. Das bleibt die getrennte Frage aus Regel 5a, mit ihrer eigenen
+Vorgabe.
 
 ### 6. TradingControl-Journal wird aus diesem Projekt heraus nicht geändert
 

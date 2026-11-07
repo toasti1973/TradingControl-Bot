@@ -649,3 +649,123 @@ describe('TradePlanMonitor — Widersprueche beim Hochfahren', () => {
     return m;
   }
 });
+
+// ============================================================
+// Nach einem Stop dürfen keine Kauf-Limits liegen bleiben
+//
+// Ein gestaffelter Einstieg lässt Limits UNTER dem Kurs liegen.
+// Greift der Stop, fällt der Kurs genau in deren Richtung weiter —
+// sie würden gefüllt und eröffneten eine NEUE Position.
+//
+// Und zwar eine unbeaufsichtigte: Nach dem Stop steht der Plan auf
+// 'completed', und `processPlan` überspringt ihn. Kein Stop-Loss,
+// keine Ziele, niemand, der nachsieht.
+//
+// `slErreicht()` nahm bisher nur die Take-Profits zurück.
+// ============================================================
+
+describe('TradePlanMonitor — Kauf-Limits nach dem Stop', () => {
+  let verzeichnis: string;
+  let store: SqliteStore;
+
+  beforeEach(() => {
+    verzeichnis = mkdtempSync(join(tmpdir(), 'slstorno-'));
+    store = new SqliteStore(join(verzeichnis, 'bot.db'));
+
+    const p = plan();
+    store.upsertBotTradePlan({
+      ...p,
+      entry_orders: JSON.stringify(p.entry_orders),
+      take_profits: JSON.stringify(p.take_profits),
+      activation_conditions: '[]', executed_orders: '[]',
+      execution_mode: 'all_limit', entry_zones: null,
+    });
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(verzeichnis, { recursive: true, force: true });
+  });
+
+  /** Ein gefüllter Einstieg und ein noch offenes Kauf-Limit darunter. */
+  function lageVorDemStop() {
+    store.insertPlanOrder({
+      id: 'o-e1', trade_plan_id: 'plan-1', entry_order_id: 'e1',
+      side: 'buy', order_type: 'limit', role: 'entry', symbol: 'BTCUSDT',
+      price: 50_000, quantity: 0.1, status: 'filled', broker: 'attrappe',
+      broker_order_id: 'boerse-e1',
+    });
+    store.updatePlanOrder('o-e1', { filled_quantity: 0.1, avg_fill_price: 50_000 });
+
+    store.insertPlanOrder({
+      id: 'o-e2', trade_plan_id: 'plan-1', entry_order_id: 'e2',
+      side: 'buy', order_type: 'limit', role: 'entry', symbol: 'BTCUSDT',
+      price: 49_000, quantity: 0.1, status: 'placed', broker: 'attrappe',
+      broker_order_id: 'boerse-e2',
+    });
+  }
+
+  it('nimmt das offene Kauf-Limit zurück, wenn der Stop greift', async () => {
+    const broker = brokerAttrappe();
+    const monitor = baueMonitor(broker);
+    lageVorDemStop();
+    monitor.registerPlan(plan());
+
+    const state = monitor.getState('plan-1') as unknown as {
+      slCurrent: number | null; remainingSize: number;
+    };
+    await (monitor as unknown as {
+      slErreicht(s: unknown, preis: number, menge: number): Promise<void>;
+    }).slErreicht(state, 47_000, 0.1);
+
+    // Das Limit bei 49.000 hätte sonst beim weiteren Fall gefüllt.
+    expect(broker.storniert).toContain('boerse-e2');
+  });
+
+  it('schließt den Plan erst ab, wenn kein Kauf-Limit mehr liegt', async () => {
+    // Das Zurücknehmen scheitert — der Plan darf dann NICHT auf
+    // 'completed' gehen, sonst sieht `processPlan` nie wieder nach ihm.
+    const broker = brokerAttrappe({ cancelFehler: true });
+    const monitor = baueMonitor(broker);
+    lageVorDemStop();
+    monitor.registerPlan(plan());
+
+    const state = monitor.getState('plan-1') as unknown as { status: string };
+    await (monitor as unknown as {
+      slErreicht(s: unknown, preis: number, menge: number): Promise<void>;
+    }).slErreicht(state, 47_000, 0.1);
+
+    expect(state.status).not.toBe('completed');
+  });
+
+  it('schließt ab, wenn alles sauber zurückgenommen wurde', async () => {
+    const broker = brokerAttrappe();
+    const monitor = baueMonitor(broker);
+    lageVorDemStop();
+
+    // Die gefüllte Stop-Order gehört dazu: `slErreicht` rechnet die
+    // offene Position aus den Orders, und ohne sie gälte die Position
+    // weiter als offen.
+    store.insertPlanOrder({
+      id: 'o-sl', trade_plan_id: 'plan-1', side: 'sell', order_type: 'stop',
+      role: 'stop_loss', symbol: 'BTCUSDT', price: 47_000, quantity: 0.1,
+      status: 'filled', broker: 'attrappe', broker_order_id: 'boerse-sl',
+    });
+    store.updatePlanOrder('o-sl', { filled_quantity: 0.1, avg_fill_price: 47_000 });
+
+    monitor.registerPlan(plan());
+
+    const state = monitor.getState('plan-1') as unknown as { status: string };
+    await (monitor as unknown as {
+      slErreicht(s: unknown, preis: number, menge: number): Promise<void>;
+    }).slErreicht(state, 47_000, 0.1);
+
+    expect(state.status).toBe('completed');
+  });
+
+  function baueMonitor(broker: ReturnType<typeof brokerAttrappe>) {
+    return new TradePlanMonitor(broker.registry, store, stilleAusgabe, {
+      nurMicaBoersen: false, defaultExchange: 'paper',
+    }) as unknown as MonitorIntern & { registerPlan(p: unknown): void };
+  }
+});

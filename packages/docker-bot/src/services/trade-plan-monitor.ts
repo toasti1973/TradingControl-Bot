@@ -50,6 +50,37 @@ const BOT_DEVICE_ID = process.env['HOSTNAME'] || 'docker-bot';
  */
 const MINDESTABSTAND_ZIEL_PCT = 0.05;
 
+/**
+ * Wieviel zusaetzliches Risiko darf ein Market-Einstieg
+ * (`first_market_rest_limit`) mitbringen?
+ *
+ * Gemessen am Abstand zwischen geplantem Einstieg und Stop-Loss —
+ * nicht am Preis. Das ist das sachlich richtige Mass: Ein Prozent
+ * vom Kurs bedeutet bei einem engen Stop viel und bei einem weiten
+ * wenig, und bei gestaffelten Einstiegen liegt schon der erste
+ * regelmaessig ein bis zwei Prozent vom Markt entfernt.
+ *
+ * Beispiel: Einstieg 99, Stop 90 — der Abstand ist 9. Bei 25 % darf
+ * der Kurs bis 101,25 stehen; das Risiko waechst dann von 9 auf
+ * 11,25 Punkte. Darueber wird abgelehnt: Ein Stop, der fuer einen
+ * Einstieg bei 99 bemessen war, passt zu einem Einstieg bei 105
+ * nicht mehr.
+ *
+ * Nur nach der schlechten Seite. Ein guenstigerer Kurs verkleinert
+ * das Risiko und ist nie ein Grund zu warten.
+ */
+const MARKT_HOECHSTES_MEHRRISIKO_PCT = 25;
+
+/**
+ * Rueckfall, wenn der Plan keinen Stop nennt.
+ *
+ * Ohne Stop laesst sich kein Risiko messen; dann bleibt nur der
+ * Abstand zum geplanten Einstieg. Grosszuegiger als die
+ * Risikoschranke, weil ein Plan ohne Stop ohnehin nicht die enge
+ * Fuehrung erwartet.
+ */
+const MARKT_HOECHSTABWEICHUNG_OHNE_STOP_PCT = 2.0;
+
 interface MonitorState {
   plan: TradePlan;
   status: 'waiting_activation' | 'monitoring' | 'completed' | 'cancelled' | 'error';
@@ -267,6 +298,9 @@ export class TradePlanMonitor extends EventEmitter {
       slType: plan.stop_loss_type ?? 'fixed',
       trailingActive: plan.stop_loss_type === 'trailing',
       trailingBestPrice: null,
+      // Mitgefuehrt, aber ohne Wirkung — siehe updateTrailingStop().
+      // Dass der Wert im Zustand steht, heisst nur, dass er nicht
+      // verlorengeht; gehandelt wird nach ihm nicht.
       trailingSizePct: plan.trailing_stop_size_pct ?? null,
       // Nicht die geplante Groesse, sondern die tatsaechlich offene:
       // Bei einem frischen Plan ist das 0, bei einem wieder aufgenommenen
@@ -292,6 +326,30 @@ export class TradePlanMonitor extends EventEmitter {
       planId: plan.id, symbol: plan.symbol, status: initialStatus,
       offenePosition: state.remainingSize,
     }, 'Plan registriert');
+
+    this.warneVorTeilTrailing(plan);
+  }
+
+  /**
+   * Sagt es, wenn ein Plan ein Teil-Trailing vorsieht.
+   *
+   * Der Trailing-Stop dieses Bots schliesst immer die gesamte
+   * verbliebene Position — er reizt den letzten Rest aus, und dann
+   * geht alles. Ein Plan mit `trailing_stop_size_pct` erwartet etwas
+   * anderes, und das bliebe sonst unbemerkt: Die Zahl stuende im
+   * Journal, der Bot handelte danach nicht, und niemand erfuehre es.
+   *
+   * Lieber eine Zeile im Protokoll als eine stille Abweichung
+   * zwischen dem, was geplant, und dem, was getan wird.
+   */
+  private warneVorTeilTrailing(plan: TradePlan): void {
+    const pct = plan.trailing_stop_size_pct;
+    if (pct == null || pct <= 0 || pct >= 100) return;
+
+    this.logger.warn({
+      planId: plan.id, symbol: plan.symbol, trailing_stop_size_pct: pct,
+    }, 'Plan sieht ein Teil-Trailing vor — der Bot schliesst beim Trailing-Stop ' +
+       'immer die GANZE Position. Die Angabe bleibt ohne Wirkung.');
   }
 
   /**
@@ -465,7 +523,7 @@ export class TradePlanMonitor extends EventEmitter {
         if (!brokerOrderId) continue;
         try {
           const broker = await this.brokerFor(plan);
-          await broker.cancelOrder(plan.symbol, brokerOrderId);
+          await broker.cancelOrder(plan.symbol, brokerOrderId, plan.direction);
           this.store.updatePlanOrder(o.id as string, { status: 'cancelled' });
         } catch (err) {
           this.logger.warn({ err, orderId: o.id }, 'TP/SL-Cancel beim Plan-Update fehlgeschlagen');
@@ -505,10 +563,25 @@ export class TradePlanMonitor extends EventEmitter {
     }
 
     const priceMap = new Map<string, number>();
+
+    // Hoch und Tief seit der letzten Abfrage, wenn die Boerse einen
+    // Kursstrom liefert. Siehe `kursSpanne()` im Monitor-Kopf, warum
+    // der Punktwert dafuer nicht genuegt.
+    const spannen = new Map<string, { hoch: number; tief: number; ticks: number }>();
+
     await Promise.allSettled([...abzufragen.entries()].map(async ([key, { symbol, plan }]) => {
       const broker = await this.brokerFor(plan);
       const price = await broker.getPrice(symbol);
       if (price != null) priceMap.set(key, price);
+
+      // **Die Spanne wird beim Lesen zurueckgesetzt.** Deshalb genau
+      // einmal je Durchlauf abfragen und weiterreichen — ein zweiter
+      // Aufruf bekaeme eine leere.
+      const mitStrom = broker as { kursSpanne?: (s: string) => { hoch: number; tief: number; ticks: number } | null };
+      if (typeof mitStrom.kursSpanne === 'function') {
+        const spanne = mitStrom.kursSpanne(symbol);
+        if (spanne && spanne.ticks > 0) spannen.set(key, spanne);
+      }
     }));
 
     // Pro Plan abarbeiten
@@ -520,7 +593,10 @@ export class TradePlanMonitor extends EventEmitter {
       try {
         state.lastPrice = price;
         state.lastPriceAt = Date.now();
-        await this.processPlan(state, price);
+        await this.processPlan(
+          state, price,
+          spannen.get(`${this.exchangeOf(state.plan)}|${state.plan.symbol}`),
+        );
       } catch (err) {
         state.errorCount++;
         state.status = state.errorCount >= this.maxErrors ? 'error' : state.status;
@@ -538,7 +614,11 @@ export class TradePlanMonitor extends EventEmitter {
   // Pro-Plan Verarbeitung
   // ============================================================
 
-  private async processPlan(state: MonitorState, currentPrice: number): Promise<void> {
+  private async processPlan(
+    state: MonitorState,
+    currentPrice: number,
+    spanne?: { hoch: number; tief: number; ticks: number },
+  ): Promise<void> {
     const plan = state.plan;
 
     // 0. Cancelled → aufraeumen. ERST die Position, DANN die Orders.
@@ -641,17 +721,25 @@ export class TradePlanMonitor extends EventEmitter {
     }
 
     // 4b. Nachlauf: Liess sich eine Einstiegs-Order beim Take-Profit
-    // nicht zuruecknehmen — etwa weil die Boerse gerade nicht erreichbar
-    // war —, wird es hier erneut versucht. Ohne diesen Nachlauf bliebe
-    // ein Kauf-Limit liegen und koennte Stunden spaeter in eine Position
-    // hinein zuschlagen, die bereits abgebaut wird.
-    if (this.istEinstiegsphaseBeendet(state) && !state.einstiegeStorniert) {
+    // oder beim Stop nicht zuruecknehmen — etwa weil die Boerse gerade
+    // nicht erreichbar war —, wird es hier erneut versucht. Ohne
+    // diesen Nachlauf bliebe ein Kauf-Limit liegen und koennte Stunden
+    // spaeter in eine Position hinein zuschlagen, die bereits
+    // abgebaut wird.
+    //
+    // `istStopGelaufen` gehoert dazu: Nach einem Stop ohne
+    // vorangegangenen Take-Profit meldet `istEinstiegsphaseBeendet`
+    // weiterhin false — sie liest den TP-Zustand. Der Nachlauf
+    // griffe dann nie, und ein nicht zurueckgenommenes Kauf-Limit
+    // eroeffnete spaeter eine Position ohne Aufsicht.
+    if ((this.istEinstiegsphaseBeendet(state) || this.istStopGelaufen(state))
+        && !state.einstiegeStorniert) {
       await this.storniereOffeneEinstiege(state);
     }
 
     // 5. Trailing-Stop nachziehen — nur bei offener Position.
     if (state.trailingActive && this.offenePosition(state) > 0) {
-      this.updateTrailingStop(state, currentPrice);
+      this.updateTrailingStop(state, currentPrice, spanne);
     }
 
     // 5b. Untergrenzen des Stops — NACH dem Trailing.
@@ -813,7 +901,7 @@ export class TradePlanMonitor extends EventEmitter {
       if (!brokerOrderId) continue;
       try {
         const broker = await this.brokerFor(plan);
-        await broker.cancelOrder(plan.symbol, brokerOrderId);
+        await broker.cancelOrder(plan.symbol, brokerOrderId, plan.direction);
         this.store.updatePlanOrder(order.id as string, { status: 'cancelled' });
 
         this.store.insertExecutionReport({
@@ -1015,7 +1103,7 @@ export class TradePlanMonitor extends EventEmitter {
 
       try {
         const broker = await this.brokerFor(plan);
-        await broker.cancelOrder(plan.symbol, brokerOrderId);
+        await broker.cancelOrder(plan.symbol, brokerOrderId, plan.direction);
         this.store.updatePlanOrder(order.id as string, { status: 'cancelled' });
         storniert++;
 
@@ -1091,13 +1179,32 @@ export class TradePlanMonitor extends EventEmitter {
         continue;
       }
 
-      // Eine Market-Order braucht den Kurs — sie fuehrt sofort aus.
-      // Das betrifft nur den ersten Einstieg bei
-      // 'first_market_rest_limit'.
+      // **Erste Order zu Markt: sofort, ohne auf einen Preis zu warten.**
+      //
+      // Das ist der ganze Zweck von 'first_market_rest_limit' — die
+      // Position JETZT eroeffnen und die Nachkaeufe per Limit tiefer
+      // legen.
+      //
+      // Hier stand eine Preispruefung: Die Market-Order ging erst
+      // hinaus, wenn der Kurs den geplanten Einstieg beruehrte. Damit
+      // war sie ein schlechteres Limit — dieselbe Wartezeit, aber
+      // Taker-Gebuehr statt Maker und ohne die Sicherheit einer
+      // liegenden Order. Von "sofortiger Eroeffnung" blieb nichts.
       const istErster = state.triggeredEntries.size === 0;
       if (executionMode === 'first_market_rest_limit' && istErster) {
-        const priceHit = this.checkEntryPriceHit(plan.direction, currentPrice, entry.price);
-        if (!priceHit) continue;
+        // Eine Schranke bleibt noetig. Steht der Kurs deutlich
+        // SCHLECHTER als geplant, eroeffnete ein spaet eintreffendes
+        // Signal eine Position zu einem Preis, zu dem der geplante
+        // Stop nicht mehr passt.
+        const urteil = this.marktEinstiegVertretbar(plan, entry.price, currentPrice);
+        if (!urteil.ok) {
+          this.auditReject(plan, entry, urteil.grund, 'entry');
+          this.logger.warn({
+            planId: plan.id, kurs: currentPrice, geplant: entry.price, grund: urteil.grund,
+          }, 'Market-Einstieg abgelehnt — der Kurs ist dem Plan davongelaufen');
+          continue;
+        }
+
         await this.executeEntryOrder(state, entry, currentPrice);
         continue;
       }
@@ -1147,7 +1254,7 @@ export class TradePlanMonitor extends EventEmitter {
    * Antwort meldete trotzdem Erfolg. Die Orders wissen auch ohne
    * Monitor, was offen ist.
    */
-  private offenePositionVon(planId: string): number {
+  private offenePositionVon(planId: string, nurBroker?: string): number {
     const orders = this.store.getPlanOrders(planId);
 
     let eingestiegen = 0;
@@ -1156,6 +1263,17 @@ export class TradePlanMonitor extends EventEmitter {
     for (const o of orders) {
       const gefuellt = Number(o.filled_quantity ?? 0);
       if (gefuellt <= 0) continue;
+
+      // **Orders verschiedener Broker gehoeren nicht in dieselbe
+      // Rechnung.** Eine Fuellung beim Uebungsbroker und eine an der
+      // echten Boerse betreffen zwei Konten; zusammengezaehlt ergeben
+      // sie eine Zahl, die es nirgends gibt.
+      //
+      // Am 05.11.2026 hob sich ein gefuellter Uebungs-Einstieg gegen
+      // den Uebungs-Stop auf — `remaining_size` war 0, waehrend zwei
+      // echte Kauf-Limits bei Phemex lagen. Der Plan galt als fertig
+      // und wurde nicht mehr beaufsichtigt.
+      if (nurBroker && String(o.broker ?? '') !== nurBroker) continue;
 
       if (o.role === 'entry') eingestiegen += gefuellt;
       else if (o.role === 'take_profit' || o.role === 'stop_loss' || o.role === 'trailing_stop') {
@@ -1166,6 +1284,30 @@ export class TradePlanMonitor extends EventEmitter {
     const offen = eingestiegen - geschlossen;
     // Rechenrauschen abschneiden, wie bei den Mengen ueblich.
     return offen > 1e-9 ? Number(offen.toFixed(10)) : 0;
+  }
+
+  /**
+   * Hat dieser Plan schon Orders auf einem ANDEREN Broker?
+   *
+   * Gibt dessen Namen zurueck, sonst `null`.
+   *
+   * **Ein Plan gehoert zu einem Konto.** Am 05.11.2026 lief ein
+   * TC-Plan zuerst im Uebungsbetrieb — Einstieg gefuellt, Stop
+   * gelaufen, Plan `completed`. Zwei Minuten spaeter wurde Phemex auf
+   * echten Handel umgestellt, und derselbe Plan schickte zwei
+   * Einstiege an die echte Boerse. Ohne TP, ohne SL: Der Monitor
+   * fuehrte ihn ja als fertig.
+   *
+   * Beides zusammen geht nicht. Wer von Uebung auf Echthandel
+   * umstellt, fange einen neuen Plan an — der alte traegt die
+   * Geschichte eines anderen Kontos.
+   */
+  private fremderBroker(planId: string, aktuell: string): string | null {
+    for (const o of this.store.getPlanOrders(planId)) {
+      const name = String(o.broker ?? '');
+      if (name && name !== aktuell) return name;
+    }
+    return null;
   }
 
   /**
@@ -1324,6 +1466,33 @@ export class TradePlanMonitor extends EventEmitter {
   }
 
   /**
+   * Hat der Stop dieses Plans bereits gegriffen?
+   *
+   * Aus den Orders gelesen, nicht aus einem Merker: Der Zustand im
+   * Arbeitsspeicher geht bei einem Neustart verloren, die gefuellte
+   * Stop-Order nicht.
+   *
+   * Gebraucht fuer den Nachlauf in `processPlan`. Nach einem Stop
+   * ohne vorangegangenen Take-Profit meldet
+   * `istEinstiegsphaseBeendet()` weiterhin false — sie liest allein
+   * den TP-Zustand. Der Nachlauf griffe dann nie, und ein nicht
+   * zurueckgenommenes Kauf-Limit eroeffnete spaeter eine Position
+   * ohne jede Aufsicht.
+   */
+  private istStopGelaufen(state: MonitorState): boolean {
+    try {
+      return this.store.getPlanOrders(state.plan.id).some(o =>
+        (o.role === 'stop_loss' || o.role === 'trailing_stop')
+        && Number(o.filled_quantity ?? 0) > 0,
+      );
+    } catch {
+      // Ohne Auskunft lieber kein Nachlauf als ein Fehlalarm — die
+      // uebrigen Pfade greifen weiterhin.
+      return false;
+    }
+  }
+
+  /**
    * Nimmt alle Einstiegs-Orders zurueck, die noch nicht gefuellt sind.
    *
    * Wird nach dem ersten Take-Profit aufgerufen. Was hier nicht
@@ -1362,7 +1531,7 @@ export class TradePlanMonitor extends EventEmitter {
 
       try {
         const broker = await this.brokerFor(plan);
-        await broker.cancelOrder(plan.symbol, brokerOrderId);
+        await broker.cancelOrder(plan.symbol, brokerOrderId, plan.direction);
         this.store.updatePlanOrder(order.id as string, { status: 'cancelled' });
         entfallen += offenerTeil;
 
@@ -1516,6 +1685,62 @@ export class TradePlanMonitor extends EventEmitter {
     return richtung === plan.direction;
   }
 
+  /**
+   * Ist ein sofortiger Market-Einstieg zum jetzigen Kurs vertretbar?
+   *
+   * Gemessen wird am **Risiko**, nicht am Preis: Wieviel weiter ist
+   * der Weg bis zum Stop geworden? Ein Prozent vom Kurs bedeutet bei
+   * einem engen Stop viel und bei einem weiten wenig — und bei
+   * gestaffelten Einstiegen liegt schon der erste regelmaessig ein
+   * bis zwei Prozent vom Markt entfernt.
+   *
+   * Beispiel: Einstieg 99, Stop 90, also 9 Punkte Risiko. Bei
+   * {@link MARKT_HOECHSTES_MEHRRISIKO_PCT} = 25 % darf der Kurs bis
+   * 101,25 stehen — das Risiko waechst dann auf 11,25 Punkte.
+   *
+   * Ein guenstigerer Kurs ist immer in Ordnung; er verkleinert das
+   * Risiko.
+   */
+  private marktEinstiegVertretbar(
+    plan: TradePlan, geplanterEinstieg: number, kurs: number,
+  ): { ok: true } | { ok: false; grund: string } {
+    if (!(geplanterEinstieg > 0) || !(kurs > 0)) return { ok: true };
+
+    const istLong = plan.direction !== 'short';
+
+    // Wieviel steht der Kurs schlechter? Negativ = guenstiger.
+    const schlechterUm = istLong ? kurs - geplanterEinstieg : geplanterEinstieg - kurs;
+    if (schlechterUm <= 0) return { ok: true };
+
+    const stop = plan.stop_loss_price;
+
+    // Ohne Stop laesst sich kein Risiko messen — dann bleibt nur der
+    // Abstand zum geplanten Einstieg.
+    if (stop == null || !(stop > 0)) {
+      const pct = (schlechterUm / geplanterEinstieg) * 100;
+      if (pct <= MARKT_HOECHSTABWEICHUNG_OHNE_STOP_PCT) return { ok: true };
+      return {
+        ok: false,
+        grund: `Kurs ${kurs} liegt ${pct.toFixed(2)} % schlechter als der geplante ` +
+               `Einstieg ${geplanterEinstieg} (Plan ohne Stop, Grenze ` +
+               `${MARKT_HOECHSTABWEICHUNG_OHNE_STOP_PCT} %)`,
+      };
+    }
+
+    const geplantesRisiko = Math.abs(geplanterEinstieg - stop);
+    if (!(geplantesRisiko > 0)) return { ok: true };
+
+    const mehrPct = (schlechterUm / geplantesRisiko) * 100;
+    if (mehrPct <= MARKT_HOECHSTES_MEHRRISIKO_PCT) return { ok: true };
+
+    return {
+      ok: false,
+      grund: `Kurs ${kurs} vergroessert das Risiko um ${mehrPct.toFixed(1)} % ` +
+             `(geplant: Einstieg ${geplanterEinstieg}, Stop ${stop}) — mehr als ` +
+             `${MARKT_HOECHSTES_MEHRRISIKO_PCT} %`,
+    };
+  }
+
   private checkEntryPriceHit(direction: string, currentPrice: number, entryPrice: number): boolean {
     // Long: Limit-Buy fillt wenn currentPrice <= entryPrice
     // Short: Limit-Sell fillt wenn currentPrice >= entryPrice
@@ -1563,11 +1788,62 @@ export class TradePlanMonitor extends EventEmitter {
     try {
       const broker = await this.brokerFor(plan);
 
-      // Leverage setzen (Futures)
+      // **Kein Einstieg in einen Plan, der schon auf einem anderen
+      // Konto gelaufen ist.**
+      //
+      // Siehe `fremderBroker()`: Ein Wechsel zwischen Uebungsbetrieb
+      // und echter Boerse mitten im Plan vermischt zwei Konten. Der
+      // Plan bleibt stehen und sagt, warum — ein stiller Abbruch sahe
+      // aus wie ein Plan, der nur auf seinen Kurs wartet.
+      const fremd = this.fremderBroker(plan.id, broker.name);
+      if (fremd) {
+        const grund = `Plan hat bereits Orders auf "${fremd}", jetzt laeuft er auf ` +
+          `"${broker.name}" — Uebungsbetrieb und Echthandel duerfen sich in einem ` +
+          `Plan nicht mischen. Bitte den Plan beenden und neu anlegen.`;
+        this.auditReject(plan, entry, grund, 'entry');
+        this.logger.error({
+          planId: plan.id, bisher: fremd, jetzt: broker.name,
+        }, 'Broker-Wechsel mitten im Plan — Einstieg wird NICHT abgeschickt');
+        return;
+      }
+
+      // **Ohne bestaetigten Hebel wird nicht eingestiegen.**
+      //
+      // Hier stand `.catch(() => warn('fahre fort'))`. Das hiess:
+      // handeln mit unbekanntem Hebel — und der Hebel entscheidet
+      // zusammen mit dem Stop, wo die Liquidation liegt.
+      //
+      // Am 05.11.2026 um 17:10 scheiterte `setLeverage` bei Phemex mit
+      // `TE_ERR_INCONSISTENT_POS_MODE`. Der Bot fuhr fort, und Phemex
+      // nahm seine Voreinstellung:
+      //
+      //   | | geplant | tatsaechlich |
+      //   |---|---|---|
+      //   | Hebel | 4 | **20** |
+      //   | Margin fuer 0,0522 BTC | 994,89 USDT | 198,98 USDT |
+      //   | Liquidation (grob) | ~57.000 | **~72.400** |
+      //
+      // Der geplante Stop lag bei 74.400 — nur noch 2.000 Punkte vor
+      // der Liquidation statt 17.000. Die Positionsgroesse war auf
+      // Hebel 4 gerechnet; mit 20 handelte der Plan ein anderes
+      // Geschaeft als das, das er meinte.
+      //
+      // Ein Hebel, der sich nicht setzen laesst, ist deshalb ein
+      // Grund, **nicht** zu handeln. Der naechste Durchlauf versucht es
+      // erneut; bis dahin liegt nichts an der Boerse, was niemand
+      // bestellt hat.
       if (plan.market_type === 'futures') {
-        await broker.setLeverage(plan.symbol, plan.leverage).catch(err => {
-          this.logger.warn({ err }, 'setLeverage fehlgeschlagen — fahre fort');
-        });
+        try {
+          await broker.setLeverage(plan.symbol, plan.leverage);
+        } catch (err) {
+          const grund = `Hebel ${plan.leverage}x liess sich nicht setzen: ` +
+            (err instanceof Error ? err.message : String(err));
+          this.auditReject(plan, entry, grund, 'entry');
+          this.logger.error({
+            planId: plan.id, symbol: plan.symbol, hebel: plan.leverage, err,
+          }, 'Hebel nicht gesetzt — Einstieg wird NICHT abgeschickt');
+          return;
+        }
       }
 
       const result = await broker.placeOrder({
@@ -1701,6 +1977,15 @@ export class TradePlanMonitor extends EventEmitter {
         : currentPrice <= tp.price;
       if (!hit) continue;
 
+      // Traegt das Ziel eine Indikator-Bedingung, muss sie JETZT
+      // zutreffen. Hier laeuft der einzige Weg fuer solche Ziele:
+      // Ins Orderbuch kommen sie nicht, weil die Boerse keinen RSI
+      // kennt (siehe `synchronisiereTpOrders`).
+      if (tp.trigger) {
+        const trifftZu = await this.evaluateTrigger(plan.symbol, currentPrice, tp.trigger);
+        if (!trifftZu) continue;
+      }
+
       await this.executeTpHit(state, tp, i, currentPrice);
     }
   }
@@ -1743,6 +2028,23 @@ export class TradePlanMonitor extends EventEmitter {
       const tpState = state.tpState[index];
       if (!tp || !tpState || tpState.triggered) continue;
 
+      // **Ziele mit Indikator-Bedingung warten.**
+      //
+      // Die Boerse kennt keinen RSI. Ein Ziel, das erst bei einer
+      // Indikatorlage gelten soll, darf deshalb nicht vorab ins
+      // Orderbuch — es wuerde gefuellt, sobald der Kurs es beruehrt,
+      // ganz gleich was der Indikator sagt. Dieselbe Ueberlegung wie
+      // bei den Einstiegen (`processEntries`).
+      //
+      // Das Feld wurde bisher gar nicht gelesen: Ein Ziel mit Trigger
+      // wurde wie eines ohne behandelt.
+      if (tp.trigger) {
+        if (tpState.orderId) {
+          await this.nimmTpOrderZurueck(state, index, 'Ziel wartet auf seinen Indikator');
+        }
+        continue;
+      }
+
       const gewuenscht = mengen[index] ?? 0;
 
       if (gewuenscht <= 0) {
@@ -1770,12 +2072,39 @@ export class TradePlanMonitor extends EventEmitter {
   /**
    * Wieviel soll jedes noch offene Ziel schliessen?
    *
-   * Die Anteile beziehen sich auf die eingestiegene Menge, nicht auf
-   * die geplante: Wurden erst zwei von vier Einstiegen gefuellt, nimmt
-   * ein 25-%-Ziel ein Viertel DAVON — sonst wollte es ein Viertel
-   * einer Position schliessen, die es nie gab.
+   * Drei Angaben am Ziel entscheiden, in dieser Rangfolge:
    *
-   * Die Summe wird auf die offene Menge gedeckelt. Was ueber sie
+   * 1. **`size`** — eine feste Menge. Sie gilt, wie sie dasteht.
+   * 2. **`percentage` mit `size_basis: 'rest'`** — Anteil dessen, was
+   *    zum Zeitpunkt dieses Ziels noch offen waere.
+   * 3. **`percentage`** (Vorgabe) — Anteil der GESAMTEN eingestiegenen
+   *    Menge.
+   *
+   * ## Warum "eingestiegen" und nicht "geplant"
+   *
+   * Wurden erst zwei von vier Einstiegen gefuellt, nimmt ein
+   * 25-%-Ziel ein Viertel DAVON — sonst wollte es ein Viertel einer
+   * Position schliessen, die es nie gab. Mit jedem weiteren Einstieg
+   * waechst der Bezug, und die liegenden Ziel-Orders wachsen mit
+   * (`synchronisiereTpOrders` legt sie groesser neu).
+   *
+   * ## Der Unterschied der beiden Bezugsgroessen
+   *
+   * Vier Ziele zu je 25 % auf 100 Einheiten:
+   *
+   * | | `eingestiegen` | `rest` |
+   * |---|---|---|
+   * | TP1 | 25 | 25 |
+   * | TP2 | 25 | 18,75 |
+   * | TP3 | 25 | 14,06 |
+   * | TP4 | 25 | 10,55 |
+   * | bleibt | 0 | 31,64 |
+   *
+   * Bei `rest` zaehlt der Stand VOR diesem Ziel — nicht der jetzige
+   * Rest. Sonst haenge die Menge davon ab, wann der Bot zufaellig
+   * nachsieht, und die liegende Order flatterte mit jedem Durchlauf.
+   *
+   * Die Summe wird auf die offene Menge gedeckelt. Was darueber
    * hinausginge, faellt beim letzten Ziel weg, nicht beim ersten: Das
    * naechste Ziel ist das wahrscheinlichste.
    */
@@ -1789,6 +2118,12 @@ export class TradePlanMonitor extends EventEmitter {
       .reduce((s, o) => s + (Number(o.filled_quantity) || 0), 0);
     const bezug = eingestiegen > 0 ? eingestiegen : plan.total_size;
 
+    // Fuer `size_basis: 'rest'`: der gedachte Stand vor jedem Ziel.
+    // Beginnt bei der eingestiegenen Menge und wird um jedes Ziel
+    // verringert — auch um die bereits erreichten, denn deren Anteil
+    // ist ja schon abgeflossen.
+    let gedachterRest = bezug;
+
     const mengen: number[] = [];
     let rest = offen;
 
@@ -1796,15 +2131,42 @@ export class TradePlanMonitor extends EventEmitter {
       const tp = tps[i]!;
       const tpState = state.tpState[i];
 
+      // Der gedachte Rest schrumpft auch um bereits erreichte Ziele —
+      // ihr Anteil ist abgeflossen, und die folgenden rechnen auf dem
+      // Stand danach.
+      const anteilDiesesZiels = this.tpAnteil(tp, bezug, gedachterRest);
+      gedachterRest = Math.max(0, gedachterRest - anteilDiesesZiels);
+
       if (!tpState || tpState.triggered) { mengen.push(0); continue; }
 
-      const gewuenscht = bezug * (getTpPercentage(tp) / 100);
-      const menge = this.runde(Math.min(gewuenscht, rest));
+      const menge = this.runde(Math.min(anteilDiesesZiels, rest));
       mengen.push(menge);
       rest = this.runde(rest - menge);
     }
 
     return mengen;
+  }
+
+  /**
+   * Die Menge, die ein einzelnes Ziel schliessen soll.
+   *
+   * `size` vor `percentage`: Eine feste Menge ist eine Ansage, kein
+   * Richtwert. Steht sie da, wird sie genommen — auch wenn daneben
+   * ein Prozentsatz steht.
+   *
+   * Siehe `tpMengen` fuer den Unterschied der beiden Bezugsgroessen.
+   */
+  private tpAnteil(tp: TakeProfit, eingestiegen: number, gedachterRest: number): number {
+    // Feste Menge. Bisher wurde das Feld gar nicht gelesen — ein Plan
+    // mit absoluten Zielmengen wurde nach Prozenten gehandelt.
+    const fest = Number(tp.size) || 0;
+    if (fest > 0) return fest;
+
+    const pct = getTpPercentage(tp);
+    if (!(pct > 0)) return 0;
+
+    const basis = tp.size_basis === 'rest' ? gedachterRest : eingestiegen;
+    return basis * (pct / 100);
   }
 
   /** Legt eine einzelne Take-Profit-Order. */
@@ -1946,7 +2308,7 @@ export class TradePlanMonitor extends EventEmitter {
     if (brokerOrderId) {
       try {
         const broker = await this.brokerFor(state.plan);
-        await broker.cancelOrder(state.plan.symbol, brokerOrderId);
+        await broker.cancelOrder(state.plan.symbol, brokerOrderId, state.plan.direction);
       } catch (err) {
         // Nicht als storniert vermerken, wenn es nicht gelang: Die
         // Order liegt dann weiter an der Boerse.
@@ -2190,9 +2552,53 @@ export class TradePlanMonitor extends EventEmitter {
     // Position anknabbern.
     await this.nimmTpOrdersZurueck(state, 'Stop hat gegriffen');
 
-    if (state.remainingSize <= 0) {
+    // **Und die noch offenen Kauf-Limits ebenso.**
+    //
+    // Das ist der gefaehrlichere Teil. Ein gestaffelter Einstieg
+    // laesst Limits unter dem Kurs liegen; greift der Stop, faellt
+    // der Kurs genau in deren Richtung weiter. Sie wuerden gefuellt
+    // und eroeffneten eine NEUE Position — ohne Stop, ohne Ziele und
+    // ohne Aufsicht, denn der Plan steht dann auf 'completed' und
+    // wird von `processPlan` uebersprungen.
+    //
+    // Nach einem Stop ist der Trade vorbei. Was er an Auftraegen
+    // hinterlaesst, gehoert zurueckgenommen — nicht erst, wenn jemand
+    // es bemerkt.
+    try {
+      await this.storniereOffeneEinstiege(state);
+    } catch (err) {
+      // Kein Abbruch: Der Stop ist gelaufen, das Ergebnis steht. Ein
+      // Nachlauf in `processPlan` versucht es erneut — deshalb wird
+      // der Plan unten auch nur dann abgeschlossen, wenn nichts mehr
+      // offen ist.
+      this.logger.error(
+        { err, planId: plan.id },
+        'Kauf-Limits liessen sich nach dem Stop nicht zuruecknehmen — ' +
+        'sie liegen weiter an der Boerse und koennten eine neue Position eroeffnen',
+      );
+    }
+
+    // **Abgeschlossen wird nur, wenn wirklich nichts mehr liegt.**
+    //
+    // Ein Plan auf 'completed' wird von `processPlan` uebersprungen —
+    // danach sieht niemand mehr nach ihm. Blieb ein Kauf-Limit
+    // liegen, weil das Zuruecknehmen scheiterte, waere das endgueltig:
+    // Es fuellte spaeter und eroeffnete eine Position, die kein
+    // Codepfad mehr beaufsichtigt.
+    //
+    // Lieber ein Plan, der offen bleibt und es beim naechsten
+    // Durchlauf erneut versucht.
+    const nochOffeneEinstiege = !state.einstiegeStorniert;
+
+    if (state.remainingSize <= 0 && !nochOffeneEinstiege) {
       state.status = 'completed';
       this.planAbschliessen(plan);
+    } else if (nochOffeneEinstiege) {
+      this.logger.warn(
+        { planId: plan.id },
+        'Plan bleibt nach dem Stop offen — es liegen noch Kauf-Limits, ' +
+        'die zurueckgenommen werden muessen',
+      );
     }
     this.persistMonitor(state);
 
@@ -2274,7 +2680,7 @@ export class TradePlanMonitor extends EventEmitter {
     if (brokerOrderId) {
       try {
         const broker = await this.brokerFor(plan);
-        await broker.cancelOrder(plan.symbol, brokerOrderId);
+        await broker.cancelOrder(plan.symbol, brokerOrderId, plan.direction);
       } catch (err) {
         this.logger.warn({ err, planId: plan.id, orderId, grund },
           'Order liess sich nicht zuruecknehmen');
@@ -2296,7 +2702,7 @@ export class TradePlanMonitor extends EventEmitter {
     if (brokerOrderId) {
       try {
         const broker = await this.brokerFor(state.plan);
-        await broker.cancelOrder(state.plan.symbol, brokerOrderId);
+        await broker.cancelOrder(state.plan.symbol, brokerOrderId, state.plan.direction);
       } catch (err) {
         this.logger.warn({
           err, planId: state.plan.id, grund,
@@ -2830,12 +3236,85 @@ export class TradePlanMonitor extends EventEmitter {
   // Trailing-Stop
   // ============================================================
 
-  private updateTrailingStop(state: MonitorState, currentPrice: number): void {
+  /**
+   * ## Der Trailing-Stop schliesst immer ALLES
+   *
+   * Er reizt den letzten Rest bis zum Ende aus — und wenn er greift,
+   * geht die gesamte verbliebene Position. Es gibt kein Teil-Trailing.
+   *
+   * `trailing_stop_size_pct` aus dem Journal (Migration 074) wird
+   * deshalb **bewusst nicht ausgewertet**. Ein Stop, der nur einen
+   * Teil schliesst, liesse den Rest ohne Absicherung stehen; das ist
+   * das Gegenteil dessen, wofuer ein Stop da ist. Das Feld wird beim
+   * Anmelden gemeldet (`warneVorTeilTrailing`), damit niemand eine
+   * Wirkung erwartet, die ausbleibt.
+   *
+   * Die Menge steht in `synchronisiereSlOrder()`: `quantity: offen`.
+   */
+  private updateTrailingStop(
+    state: MonitorState,
+    currentPrice: number,
+    spanne?: { hoch: number; tief: number; ticks: number },
+  ): void {
     const plan = state.plan;
     const pct = plan.trailing_stop_pct;
     if (pct == null || pct <= 0) return;
 
     const isLong = plan.direction === 'long';
+
+    // **Der Hoechstkurs kommt aus der Spanne, nicht aus der
+    // Stichprobe.**
+    //
+    // Das Trailing ist die einzige Groesse, die niemand ausser dem Bot
+    // kennt: Einstiege, Ziele und der Stop liegen als Orders an der
+    // Boerse (Regel 3aa) und werden dort bei jedem Tick geprueft. Der
+    // Prozentsatz vom Hoechstkurs wird hier gerechnet — und hier
+    // wurde alle zwei Sekunden hingesehen.
+    //
+    // Ein Docht zwischen zwei Abfragen hob den Hoechstkurs damit nie.
+    // Der Stop blieb zu tief: Bei 1,5 % Trailing und einem Docht, der
+    // 1 % ueber der naechsten Stichprobe lag, fehlte dem Stop genau
+    // dieses Prozent — dauerhaft, denn der Hoechstkurs geht nie
+    // zurueck.
+    //
+    // Der Kursstrom sammelt jeden Tick und gibt Hoch und Tief der
+    // ganzen Zwischenzeit heraus. Genommen wird das Extrem in
+    // **Gewinnrichtung** — beim Long das Hoch, beim Short das Tief.
+    // Das ist dieselbe Einbahn wie bei jeder anderen Stop-Verschiebung
+    // im Bot: Der Stop darf naeher an den Kurs, nie weiter weg.
+    //
+    // Das Gegen-Extrem bleibt bewusst unbenutzt. Es gegen den Stop zu
+    // pruefen hiesse, einen Docht nachtraeglich als Stop-Treffer zu
+    // buchen — den die Boerse, bei der die Order wirklich liegt,
+    // vielleicht gar nicht gesehen hat.
+    const extrem = spanne && spanne.ticks > 0
+      ? (isLong ? Math.max(spanne.hoch, currentPrice) : Math.min(spanne.tief, currentPrice))
+      : currentPrice;
+    currentPrice = extrem;
+
+    // **Erst ab der Aktivierungsschwelle.**
+    //
+    // `trailing_stop_activation` nennt den Kurs, ab dem das Trailing
+    // ueberhaupt laufen soll — beim Long darueber, beim Short
+    // darunter. Das Feld wurde bisher gelesen und beim Speichern
+    // mitgefuehrt, aber nie ausgewertet: Der Trailing-Stop lief vom
+    // ersten Durchlauf an.
+    //
+    // Die Folge war ein Stop, den der Plan so nicht vorsah. Wer im
+    // Journal "Trailing ab 52.000" einstellt, meint damit, dass der
+    // Trade bis dahin seinen festen Stop behaelt — und nicht, dass
+    // ihn schon bei 50.100 ein Prozentsatz vom Tageshoch
+    // hinauswirft.
+    const schwelle = plan.trailing_stop_activation;
+    if (schwelle != null && schwelle > 0 && state.trailingBestPrice == null) {
+      const erreicht = isLong ? currentPrice >= schwelle : currentPrice <= schwelle;
+      if (!erreicht) return;
+
+      this.logger.info({
+        planId: plan.id, schwelle, kurs: currentPrice,
+      }, 'Trailing-Schwelle erreicht — der Stop zieht ab jetzt mit');
+    }
+
     const best = state.trailingBestPrice;
 
     // Ersten besten Preis setzen
@@ -3107,13 +3586,35 @@ export class TradePlanMonitor extends EventEmitter {
     return this.brokers.get(exchangeId, plan.market_type);
   }
 
+  /**
+   * Uebt diese Boerse?
+   *
+   * Fragt die Registry, faellt aber auf "ja" zurueck, wenn sie keine
+   * Auskunft gibt — etwa weil ein aelterer Aufbau die Methode nicht
+   * kennt. Dieselbe Einbahn wie ueberall sonst: Wer nicht antwortet,
+   * bekommt den sicheren Fall, nicht den riskanten.
+   */
+  private uebtBoerse(exchangeId: string): boolean {
+    const registry = this.brokers as Partial<BrokerRegistry>;
+    if (typeof registry.uebt !== 'function') return true;
+    try {
+      return registry.uebt(exchangeId);
+    } catch {
+      return true;
+    }
+  }
+
   private exchangeOf(plan: TradePlan): string {
-    // Im Uebungsbetrieb geht nichts an eine Boerse — gleich welche der
-    // Plan nennt. Die Angabe hier bleibt deshalb auch im Protokoll
-    // 'paper'; die vorgesehene Boerse steht weiter im Plan.
+    // Uebt die Boerse dieses Plans, geht nichts an sie hinaus. Die
+    // Angabe hier bleibt dann 'paper'; die vorgesehene Boerse steht
+    // weiter im Plan.
+    //
+    // Gefragt wird je Boerse, nicht mehr global: Ein Plan auf Phemex
+    // kann uebend laufen, waehrend einer auf Bybit echt handelt.
     if (this.nurUebungsbetrieb) return 'paper';
 
     const genannt = plan.exchange?.trim().toLowerCase();
+    if (genannt && genannt !== 'unknown' && this.uebtBoerse(genannt)) return 'paper';
     // 'unknown' liefert die Journal-Schnittstelle, wenn dem Plan kein
     // Boersen-Konto zugeordnet ist.
     if (!genannt || genannt === 'unknown') return this.defaultExchange;

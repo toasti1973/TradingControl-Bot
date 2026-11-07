@@ -363,7 +363,15 @@ export class PaperBroker implements BrokerAdapter {
     return this.toOrderResult(order);
   }
 
-  async cancelOrder(_symbol: string, orderId: string): Promise<void> {
+  // `_positionSide` nimmt der Uebungsbroker nur entgegen, damit er
+  // dieselbe Schnittstelle hat. Er fuehrt die Order ueber ihre Kennung
+  // und braucht die Richtung nicht — anders als eine echte Boerse im
+  // Hedge-Modus.
+  async cancelOrder(
+    _symbol: string,
+    orderId: string,
+    _positionSide?: 'long' | 'short',
+  ): Promise<void> {
     const order = this.orders.get(orderId);
     if (order && order.status === 'new') {
       order.status = 'cancelled';
