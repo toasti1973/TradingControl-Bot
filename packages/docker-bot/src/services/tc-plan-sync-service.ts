@@ -93,7 +93,7 @@ export class TcPlanSyncService {
         id: plan.id,
         source: 'tc',
         tc_user_id: plan.user_id,
-        exchange: plan.exchange,
+        exchange: this.boerseFuerTcPlan(plan.exchange, plan.id),
         exchange_account_id: plan.exchange_account_id,
         symbol: plan.symbol,
         asset_symbol: plan.asset_symbol,
@@ -164,15 +164,62 @@ export class TcPlanSyncService {
       const id = local.id as string;
       if (tcPlanIds.has(id)) continue;
 
-      if (this.hatOffeneEngagements(id)) {
+      // Schon erledigt? Dann nichts weiter tun.
+      //
+      // Ein stornierter Plan bleibt in der Datenbank stehen — geloescht
+      // wird hier nichts. Ohne diese Zeile fiele er bei jedem Abgleich
+      // erneut durch das Aufraeumen: dieselbe Meldung alle 30 Sekunden
+      // und ein `beendePlan` auf einen Plan, an dem nichts mehr ist.
+      const status = String(local.status ?? '');
+      if (status === 'cancelled' || status === 'completed' || status === 'error') continue;
+
+      // **Position oder nur liegende Orders? Das ist ein Unterschied.**
+      //
+      // Bei einer offenen Position bleibt die Aufsicht — dort haengt
+      // ein Stop dran, und das Verschwinden aus der Antwort ist
+      // mehrdeutig (siehe oben: 'executing' verschwindet ebenfalls).
+      //
+      // Liegen dagegen nur Kauf-Limits und ist nichts gefuellt, gibt
+      // es nichts zu schuetzen. Hier blieb der Plan frueher auf
+      // ewig haengen: Die Aufsicht verhinderte das Abmelden, aber
+      // niemand nahm die Orders zurueck — und solange sie lagen,
+      // galt er als "noch offen". Ein Kreis ohne Ausgang.
+      if (this.hatOffenePosition(id)) {
         this.logger.info(
           { planId: id },
-          'Plan nicht mehr in der Journal-Antwort, aber noch offen — Aufsicht bleibt bestehen',
+          'Plan nicht mehr in der Journal-Antwort, aber mit offener Position — Aufsicht bleibt bestehen',
         );
         continue;
       }
 
-      this.monitor.unregisterPlan(id);
+      // Nichts gefuellt: Die liegenden Orders koennen weg. Danach ist
+      // der Plan wirklich erledigt.
+      //
+      // `beendePlan` statt `unregisterPlan`: Es nimmt die Orders an
+      // der Boerse zurueck. Ein blosses Abmelden liesse sie liegen,
+      // und ein Kauf-Limit, das Stunden spaeter fuellt, eroeffnete
+      // eine Position, die kein Plan mehr beaufsichtigt.
+      if (typeof this.monitor.beendePlan === 'function') {
+        void this.monitor.beendePlan(id, 'benutzer_abbruch')
+          .then(e => {
+            this.logger.info(
+              { planId: id, stornierte: e.stornierteOrders },
+              'Plan aus dem Journal verschwunden und ohne Position — Orders zurueckgenommen',
+            );
+          })
+          .catch(err => {
+            // Kein Abbruch: Beim naechsten Abgleich wird es erneut
+            // versucht. Der Plan bleibt solange stehen und sichtbar.
+            this.logger.warn(
+              { err, planId: id },
+              'Orders des verschwundenen Plans liessen sich nicht zuruecknehmen',
+            );
+          });
+      } else {
+        // Aelterer Aufbau ohne `beendePlan` — dann wenigstens abmelden.
+        this.monitor.unregisterPlan(id);
+      }
+
       this.store.updateBotTradePlanStatus(id, 'cancelled');
       removed++;
     }
@@ -215,26 +262,38 @@ export class TcPlanSyncService {
    * Aufsicht zu viel kostet nichts, eine zu wenig laesst eine offene
    * Position unbeaufsichtigt.
    */
-  private hatOffeneEngagements(planId: string): boolean {
-    const offeneStatus = new Set(['new', 'placed', 'partially_filled']);
+  /**
+   * Steht fuer diesen Plan wirklich etwas im Markt?
+   *
+   * Gerechnet aus den Orders: gefuellte Einstiege minus dessen, was
+   * Ziele und Stop schon geschlossen haben. **Liegende Orders zaehlen
+   * nicht** — sie sind Absicht, keine Position.
+   *
+   * Der Unterschied entscheidet, ob ein aus dem Journal verschwundener
+   * Plan unter Aufsicht bleibt. Frueher galt auch ein unberuehrtes
+   * Kauf-Limit als "offen"; damit blieb der Plan ewig stehen, denn
+   * das Zuruecknehmen der Orders geschah nur beim Abmelden, und
+   * abgemeldet wurde er nie.
+   */
+  private hatOffenePosition(planId: string): boolean {
     const orders = this.store.getPlanOrders(planId);
-    if (orders.some(o => offeneStatus.has(o.status as string))) return true;
 
-    const monitor = this.store.getMonitor(planId);
-    if (!monitor) return false;
+    let eingestiegen = 0;
+    let geschlossen = 0;
 
-    // Eine angebrochene Position: Es wurde etwas gekauft und noch nicht
-    // alles wieder geschlossen.
-    const rest = Number(monitor.remaining_size ?? 0);
-    const laufend = monitor.status === 'monitoring' || monitor.status === 'waiting_activation';
-    return laufend && rest > 0 && this.hatAusgefuehrteEinstiege(orders);
+    for (const o of orders) {
+      const gefuellt = Number(o.filled_quantity ?? 0);
+      if (gefuellt <= 0) continue;
+      if (o.role === 'entry') eingestiegen += gefuellt;
+      else if (o.role === 'take_profit' || o.role === 'stop_loss' || o.role === 'trailing_stop') {
+        geschlossen += gefuellt;
+      }
+    }
+
+    // Rechenrauschen abschneiden, wie ueberall bei Mengen.
+    return eingestiegen - geschlossen > 1e-9;
   }
 
-  private hatAusgefuehrteEinstiege(orders: Array<Record<string, unknown>>): boolean {
-    return orders.some(o =>
-      o.role === 'entry' && (o.status === 'filled' || o.status === 'partially_filled'),
-    );
-  }
 
   // ============================================================
   // Ausfuehrungsstand zusammenfuehren
@@ -252,6 +311,65 @@ export class TcPlanSyncService {
    * der lokalen Order-Tabelle ein. Damit ueberlebt der Stand auch den Fall,
    * dass der Bot zwischen Order und Persistierung des Plans abstuerzt.
    */
+  /**
+   * Welche Boerse gilt fuer einen Plan aus dem Journal?
+   *
+   * Der Plan bringt seine eigene mit — das Journal weiss, auf welchem
+   * Boersen-Konto er gedacht war. **Sie gilt, aber nur wenn sie im
+   * Bot auch eingerichtet und aktiv ist.**
+   *
+   * Warum die Einschraenkung: Das Journal fuehrt Boersen, die der Bot
+   * gar nicht bedient. Ein Plan auf einem dort hinterlegten Konto
+   * wuerde sonst auf eine Boerse zeigen, zu der es hier keinen Zugang
+   * gibt — und bei jedem Durchlauf mit einem Fehler abbrechen, statt
+   * sichtbar zu ruhen.
+   *
+   * Faellt die Boerse weg, greift der Uebungsbroker. Das ist die
+   * stille, aber ungefaehrliche Richtung: Der Plan laeuft, man sieht
+   * ihn, und er bewegt kein Geld. Vermerkt wird es trotzdem — eine
+   * Umleitung, die niemand bemerkt, waere eine schlechte.
+   */
+  private boerseFuerTcPlan(genannt: string | null | undefined, planId: string): string {
+    const name = String(genannt ?? '').trim().toLowerCase();
+
+    // 'unknown' liefert die Schnittstelle, wenn dem Plan im Journal
+    // kein Boersen-Konto zugeordnet ist.
+    if (!name || name === 'unknown') return 'paper';
+    if (name === 'paper') return 'paper';
+
+    // Ohne Auskunft bleibt es beim Uebungsbetrieb — dieselbe Einbahn
+    // wie ueberall: Wer nicht antworten kann, antwortet sicher.
+    let eingerichtet: Record<string, unknown> | undefined;
+    try {
+      if (typeof this.store.boersenEinstellungen !== 'function') return 'paper';
+      eingerichtet = this.store.boersenEinstellungen()
+        .find(e => String(e.exchange) === name);
+    } catch {
+      return 'paper';
+    }
+
+    if (!eingerichtet) {
+      this.logger.info(
+        { planId, boerse: name },
+        'TC-Plan nennt eine Boerse, die im Bot nicht eingerichtet ist — er laeuft im Uebungsbetrieb',
+      );
+      return 'paper';
+    }
+
+    if (eingerichtet.aktiv === 0) {
+      this.logger.info(
+        { planId, boerse: name },
+        'TC-Plan nennt eine abgeschaltete Boerse — er laeuft im Uebungsbetrieb',
+      );
+      return 'paper';
+    }
+
+    // Ob dort geuebt oder echt gehandelt wird, entscheidet weiterhin
+    // `boerseUebt()` beim Aufbau des Zugangs. Hier geht es nur darum,
+    // WELCHE Boerse gemeint ist.
+    return name;
+  }
+
   private mergeExecutedOrders(
     existing: Record<string, unknown> | undefined,
     plan: TradePlan,

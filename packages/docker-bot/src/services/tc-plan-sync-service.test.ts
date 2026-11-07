@@ -57,6 +57,7 @@ describe('TcPlanSyncService — Ausfuehrungsstand', () => {
     registerPlan: ReturnType<typeof vi.fn>;
     updatePlan: ReturnType<typeof vi.fn>;
     unregisterPlan: ReturnType<typeof vi.fn>;
+    beendePlan: ReturnType<typeof vi.fn>;
   };
   let client: { getPlans: ReturnType<typeof vi.fn>; getIndicatorsCatalog: ReturnType<typeof vi.fn> };
 
@@ -80,6 +81,9 @@ describe('TcPlanSyncService — Ausfuehrungsstand', () => {
       registerPlan: vi.fn(),
       updatePlan: vi.fn().mockResolvedValue(undefined),
       unregisterPlan: vi.fn(),
+    beendePlan: vi.fn().mockResolvedValue({
+      geschlosseneMenge: 0, stornierteOrders: 1, status: 'cancelled',
+    }),
     };
     client = { getPlans: vi.fn().mockResolvedValue([]), getIndicatorsCatalog: vi.fn() };
   });
@@ -164,43 +168,53 @@ describe('TcPlanSyncService — Ausfuehrungsstand', () => {
     expect(gespeichert.execution_mode).toBe('first_market_rest_limit');
   });
 
-  it('meldet einen Plan ab, sobald das Journal ihn nicht mehr fuehrt', async () => {
+  it('raeumt einen Plan auf, sobald das Journal ihn nicht mehr fuehrt', async () => {
     store.getBotTradePlans.mockReturnValue([{ id: 'plan-alt' }]);
     client.getPlans.mockResolvedValue([]);
 
     const ergebnis = await makeService().syncPlans();
 
-    expect(monitor.unregisterPlan).toHaveBeenCalledWith('plan-alt');
+    // Ueber `beendePlan`, damit liegende Orders mitgenommen werden.
+    expect(monitor.beendePlan).toHaveBeenCalledWith('plan-alt', 'benutzer_abbruch');
     expect(ergebnis.removed).toBe(1);
   });
 
-  it('behaelt die Aufsicht, wenn zu dem verschwundenen Plan noch Orders offen sind', async () => {
-    // Die Journal-Schnittstelle liefert nur 'active' und 'planned'. Ein Plan,
-    // der auf 'executing' wechselt, verschwindet daraus — obwohl er laeuft.
-    // Wer ihn dann abmeldet, storniert Orders mitten in der Position.
-    store.getBotTradePlans.mockReturnValue([{ id: 'plan-laufend' }]);
+  // Liegende Kauf-Limits ohne Fuellung sind KEIN Grund, die Aufsicht
+  // zu behalten — sie sind Absicht, keine Position.
+  //
+  // Frueher galten sie als "noch offen". Damit blieb der Plan auf
+  // ewig stehen: Das Abmelden war gesperrt, und das Zuruecknehmen der
+  // Orders geschah nur beim Abmelden. Ein Kreis ohne Ausgang, in dem
+  // am 05.11.2026 ein geloeschter Testplan haengenblieb.
+  it('raeumt einen verschwundenen Plan auf, der nur liegende Orders hat', async () => {
+    store.getBotTradePlans.mockReturnValue([{ id: 'plan-nur-limits' }]);
     store.getPlanOrders.mockReturnValue([
-      { role: 'entry', status: 'placed', entry_order_id: 'entry-a' },
+      // Platziert, aber nichts gefuellt.
+      { role: 'entry', status: 'placed', filled_quantity: 0, entry_order_id: 'entry-a' },
     ]);
     client.getPlans.mockResolvedValue([]);
 
     const ergebnis = await makeService().syncPlans();
 
-    expect(monitor.unregisterPlan).not.toHaveBeenCalled();
-    expect(store.updateBotTradePlanStatus).not.toHaveBeenCalled();
-    expect(ergebnis.removed).toBe(0);
+    // `beendePlan` nimmt die Orders an der Boerse zurueck — ein blosses
+    // Abmelden liesse sie liegen.
+    expect(monitor.beendePlan).toHaveBeenCalledWith('plan-nur-limits', 'benutzer_abbruch');
+    expect(ergebnis.removed).toBe(1);
   });
 
-  it('behaelt die Aufsicht bei angebrochener Position ohne offene Orders', async () => {
+  // DAS ist der Fall, der die Aufsicht rechtfertigt: Es steht wirklich
+  // etwas im Markt, und daran haengt ein Stop.
+  it('behaelt die Aufsicht bei offener Position', async () => {
     store.getBotTradePlans.mockReturnValue([{ id: 'plan-laufend' }]);
     store.getPlanOrders.mockReturnValue([
-      { role: 'entry', status: 'filled', entry_order_id: 'entry-a' },
+      { role: 'entry', status: 'filled', filled_quantity: 0.05, entry_order_id: 'entry-a' },
     ]);
     store.getMonitor.mockReturnValue({ status: 'monitoring', remaining_size: 0.05 });
     client.getPlans.mockResolvedValue([]);
 
     const ergebnis = await makeService().syncPlans();
 
+    expect(monitor.beendePlan).not.toHaveBeenCalled();
     expect(monitor.unregisterPlan).not.toHaveBeenCalled();
     expect(ergebnis.removed).toBe(0);
   });
@@ -208,15 +222,15 @@ describe('TcPlanSyncService — Ausfuehrungsstand', () => {
   it('meldet ab, wenn die Position vollstaendig geschlossen ist', async () => {
     store.getBotTradePlans.mockReturnValue([{ id: 'plan-fertig' }]);
     store.getPlanOrders.mockReturnValue([
-      { role: 'entry', status: 'filled', entry_order_id: 'entry-a' },
-      { role: 'take_profit', status: 'filled' },
+      { role: 'entry', status: 'filled', filled_quantity: 0.05, entry_order_id: 'entry-a' },
+      { role: 'take_profit', status: 'filled', filled_quantity: 0.05 },
     ]);
     store.getMonitor.mockReturnValue({ status: 'monitoring', remaining_size: 0 });
     client.getPlans.mockResolvedValue([]);
 
     const ergebnis = await makeService().syncPlans();
 
-    expect(monitor.unregisterPlan).toHaveBeenCalledWith('plan-fertig');
+    expect(monitor.beendePlan).toHaveBeenCalledWith('plan-fertig', 'benutzer_abbruch');
     expect(ergebnis.removed).toBe(1);
   });
 
