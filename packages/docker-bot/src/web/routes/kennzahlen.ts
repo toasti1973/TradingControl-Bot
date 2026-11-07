@@ -52,6 +52,54 @@ export function createKennzahlenRouter(
   });
 
   /**
+   * Dieselben Kennzahlen, aufgeteilt nach Boerse, Quelle und Strategie.
+   *
+   * Die Frage, die sich mit mehreren Boersen zuerst stellt: Welche
+   * laufen gut? Aus den Gesamtzahlen ist das nicht zu lesen — eine
+   * gute und eine schlechte Quelle ergeben zusammen eine
+   * mittelmaessige.
+   *
+   * Alle drei Aufteilungen in einer Antwort: Die Oberflaeche zeigt sie
+   * untereinander, und ein zweiter Abruf brachte nichts, was der
+   * erste nicht schon berechnet haette.
+   */
+  router.get('/api/kennzahlen/gruppen', (req, res) => {
+    const alle = dienst.trades();
+    const gefiltert = filtern(alle, req.query.strategie as string | undefined);
+
+    res.json({
+      nachBoerse: dienst.gruppiert(gefiltert, 'boerse'),
+      nachQuelle: dienst.gruppiert(gefiltert, 'quelle'),
+      nachStrategie: dienst.gruppiert(gefiltert, 'strategie'),
+      // Getrennt ausgewiesen — Uebung und Echthandel gehoeren nicht in
+      // dieselbe Summe.
+      gesamtEcht: dienst.kennzahlen(gefiltert.filter(t => !t.uebung)),
+      gesamtUebung: dienst.kennzahlen(gefiltert.filter(t => t.uebung)),
+    });
+  });
+
+  /**
+   * Ergebnis je Kalendertag — Grundlage der Kalenderansicht.
+   *
+   * Ein Tag ist der Tag des Schliessens; dann wurde das Ergebnis
+   * realisiert. Der Einstieg kann Tage zurueckliegen.
+   */
+  router.get('/api/kennzahlen/kalender', (req, res) => {
+    const alle = dienst.trades();
+    const gefiltert = filtern(alle, req.query.strategie as string | undefined);
+    const tage = dienst.jeTag(gefiltert);
+
+    res.json({
+      tage,
+      /** Fuer die Farbskala: der groesste Betrag in beide Richtungen. */
+      spanne: tage.reduce(
+        (s, t) => Math.max(s, Math.abs(t.ergebnis)), 0,
+      ),
+      summe: Math.round(tage.reduce((s, t) => s + t.ergebnis, 0) * 100) / 100,
+    });
+  });
+
+  /**
    * MAE und MFE — wie weit lief jeder Trade gegen und fuer uns.
    *
    * Holt je Symbol Kerzen von der Boerse. Das dauert; die Oberflaeche

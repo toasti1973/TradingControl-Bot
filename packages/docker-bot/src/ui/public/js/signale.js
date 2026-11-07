@@ -584,7 +584,23 @@ function planDetailAufbauen(d) {
 
   var h = '';
 
-  // --- Kursverlauf ---
+  // ============================================================
+  // Zweispaltig: Chart links und groß, Kennzahlen rechts
+  //
+  // Vorher war die Ansicht eine Kachelwand mit einem kleinen Chart
+  // obendrüber. Der Chart beantwortet aber die meisten Fragen
+  // schneller als jede Tabelle — er bekommt den Platz.
+  //
+  // Die veränderlichen Teile behalten ihre Behälter-IDs
+  // (`pd-kennzahlen`, `pd-ergebnis`, `pd-stand` …): Das Nachladen
+  // tauscht ihren Inhalt aus, ohne das Gerüst anzurühren.
+  // ============================================================
+
+  h += '<div class="pd-raster">';
+
+  // --- Linke Spalte: Chart und Tabellen ---
+  h += '<div class="pd-haupt">';
+
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
     '<h4 style="margin:0">Kursverlauf</h4>' +
     '<div id="pd-chart-intervalle" style="display:flex;gap:4px">' +
@@ -594,17 +610,10 @@ function planDetailAufbauen(d) {
         '" onclick="chartIntervallSetzen(this.dataset.iv)">' + iv + '</button>';
     }).join('') +
     '</div></div>' +
-    '<div id="pd-chart" style="height:320px;background:var(--bg-primary);' +
-    'border:1px solid var(--border);border-radius:6px;margin-bottom:4px"></div>' +
+    '<div id="pd-chart" class="pd-chart"></div>' +
     '<p class="form-hint" id="pd-chart-quelle" style="margin:0"></p>' +
     '<div id="pd-signallage" style="margin-bottom:16px">' +
       signallageHinweis(herkunft) + '</div>';
-
-  // Alle veraenderlichen Teile stehen in benannten Behaeltern — das
-  // Nachladen tauscht ihren Inhalt aus, ohne das Geruest anzuruehren.
-  h += '<div id="pd-kennzahlen">' + kennzahlenKacheln(p, d.ergebnis) + '</div>';
-  h += '<div id="pd-ergebnis">' + ergebnisAbschnitt(d.ergebnis, p) + '</div>';
-  h += '<div id="pd-stand">' + ausfuehrungsstand(m) + '</div>';
 
   // --- Einstiege ---
   h += '<h4 style="margin:16px 0 8px">Einstiege</h4>' +
@@ -626,6 +635,28 @@ function planDetailAufbauen(d) {
   // --- Stop-Loss ---
   h += '<h4 style="margin:16px 0 8px">Stop-Loss</h4>' +
     '<div id="pd-sl">' + slAbschnitt(p, m, orders) + '</div>';
+
+  // Linke Spalte zu, rechte Spalte auf.
+  h += '</div><aside class="pd-seite">';
+
+  // Kopf der Seitenleiste: Asset und Börse mit ihren Zeichen.
+  h += '<div class="pd-kopf">' +
+    (typeof symbolMitLogo === 'function'
+      ? symbolMitLogo(p.symbol, 22)
+      : esc(p.symbol)) +
+    (typeof boerseMitLogo === 'function'
+      ? '<span class="pd-boerse">' + boerseMitLogo(p.exchange || 'paper', false, 15) + '</span>'
+      : '') +
+    '</div>';
+
+  h += '<div id="pd-kennzahlen">' + kennzahlenKacheln(p, d.ergebnis) + '</div>';
+  h += '<div id="pd-ergebnis">' + ergebnisAbschnitt(d.ergebnis, p) + '</div>';
+  h += '<div id="pd-stand">' + ausfuehrungsstand(m) + '</div>';
+
+  h += '</aside></div>';
+
+  // Alles Weitere steht unter beiden Spalten — es wird seltener
+  // gebraucht und darf die volle Breite nutzen.
 
   // --- Freigabe durch ein Signal (Weg A) ---
   if (trigger) {

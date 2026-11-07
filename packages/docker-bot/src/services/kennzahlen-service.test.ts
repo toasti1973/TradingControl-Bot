@@ -184,7 +184,8 @@ describe('KennzahlenService — die Kennzahlen', () => {
   function inR(r: number, risiko = 100): TradeInR {
     return {
       planId: `p-${r}-${Math.random()}`, symbol: 'BTCUSDT', richtung: 'long',
-      strategie: 'test', signalId: 's', begonnen: null, beendet: null,
+      strategie: 'test', signalId: 's', boerse: 'paper', quelle: 'signal', uebung: true,
+      begonnen: null, beendet: null,
       dauerMinuten: null, menge: 1, einstiegsPreis: 100,
       risiko, ergebnis: r * risiko, rVielfaches: r,
       tpsErreicht: r > 0 ? 1 : 0, slGetroffen: r < 0,
@@ -371,7 +372,8 @@ describe('KennzahlenService — Kontoverlauf und Drawdown', () => {
   it('zaehlt die laengste Verlustserie', () => {
     const t = (r: number, bis: string): TradeInR => ({
       planId: bis, symbol: 'BTCUSDT', richtung: 'long', strategie: 't',
-      signalId: 's', begonnen: null, beendet: bis, dauerMinuten: null,
+      signalId: 's', boerse: 'paper', quelle: 'signal', uebung: true,
+      begonnen: null, beendet: bis, dauerMinuten: null,
       menge: 1, einstiegsPreis: 100, risiko: 100,
       ergebnis: r * 100, rVielfaches: r, tpsErreicht: 0, slGetroffen: r < 0,
     });
@@ -402,7 +404,8 @@ describe('MAE und MFE', () => {
   function trade(opt: Partial<TradeInR> = {}): TradeInR {
     return {
       planId: 'p1', symbol: 'BTCUSDT', richtung: 'long', strategie: 't',
-      signalId: 's', begonnen: '2026-10-26T10:00:00Z', beendet: '2026-10-26T11:00:00Z',
+      signalId: 's', boerse: 'paper', quelle: 'signal', uebung: true,
+      begonnen: '2026-10-26T10:00:00Z', beendet: '2026-10-26T11:00:00Z',
       dauerMinuten: 60, menge: 1, einstiegsPreis: 100,
       risiko: 5, ergebnis: 10, rVielfaches: 2,
       tpsErreicht: 1, slGetroffen: false,
@@ -534,5 +537,202 @@ describe('MAE und MFE', () => {
     expect(a.schnittMaeVerlierer).toBeCloseTo(-0.5, 2);
     expect(a.schnittMfeGewinner).toBeCloseTo(2, 2);
     expect(a.ausgewertet).toBe(2);
+  });
+});
+
+// ============================================================
+// Leistung je Börse und Signalquelle
+//
+// Die Frage, die sich mit mehreren Börsen zuerst stellt: Welche
+// laufen gut? Aus den Gesamtzahlen ist das nicht zu lesen — eine
+// gute und eine schlechte Quelle ergeben zusammen eine
+// mittelmäßige.
+// ============================================================
+
+describe('gruppiert — Kennzahlen je Herkunft', () => {
+  let verzeichnis: string;
+  let store: SqliteStore;
+  let dienst: KennzahlenService;
+
+  beforeEach(() => {
+    verzeichnis = mkdtempSync(join(tmpdir(), 'gruppen-'));
+    store = new SqliteStore(join(verzeichnis, 'bot.db'));
+    dienst = new KennzahlenService(store);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(verzeichnis, { recursive: true, force: true });
+  });
+
+  function t(opt: Partial<TradeInR>): TradeInR {
+    return {
+      planId: `p${Math.random()}`, symbol: 'BTCUSDT', richtung: 'long',
+      strategie: 'A', signalId: 's', boerse: 'phemex', quelle: 'signal',
+      uebung: true, begonnen: null, beendet: '2026-11-01T10:00:00Z',
+      dauerMinuten: 60, menge: 1, einstiegsPreis: 100,
+      risiko: 100, ergebnis: 0, rVielfaches: 0,
+      tpsErreicht: 0, slGetroffen: false,
+      ...opt,
+    };
+  }
+
+  it('teilt nach Börse auf und rechnet je Gruppe', () => {
+    const g = dienst.gruppiert([
+      t({ boerse: 'phemex', ergebnis: 100, rVielfaches: 1 }),
+      t({ boerse: 'phemex', ergebnis: 50, rVielfaches: 0.5 }),
+      t({ boerse: 'bybit', ergebnis: -30, rVielfaches: -0.3 }),
+    ], 'boerse');
+
+    expect(g).toHaveLength(2);
+    // Sortiert nach Ergebnis — die Frage ist "was läuft am besten?".
+    expect(g[0]!.name).toBe('phemex');
+    expect(g[0]!.kennzahlen.trades).toBe(2);
+    expect(g[0]!.kennzahlen.ergebnis).toBeCloseTo(150, 2);
+    expect(g[1]!.name).toBe('bybit');
+    expect(g[1]!.kennzahlen.ergebnis).toBeCloseTo(-30, 2);
+  });
+
+  it('teilt nach Strategie auf', () => {
+    const g = dienst.gruppiert([
+      t({ strategie: 'Synaptrix', ergebnis: 80 }),
+      t({ strategie: 'TradingView', ergebnis: -20 }),
+      t({ strategie: 'Synaptrix', ergebnis: 40 }),
+    ], 'strategie');
+
+    expect(g.map(x => x.name)).toEqual(['Synaptrix', 'TradingView']);
+    expect(g[0]!.kennzahlen.trades).toBe(2);
+  });
+
+  // Übung und Echthandel sind nicht dasselbe. Eine Gruppe gilt nur
+  // dann als Übung, wenn ALLE ihre Trades übten.
+  it('kennzeichnet reine Übungsgruppen', () => {
+    const g = dienst.gruppiert([
+      t({ boerse: 'paper', uebung: true }),
+      t({ boerse: 'paper', uebung: true }),
+      t({ boerse: 'phemex', uebung: false }),
+    ], 'boerse');
+
+    expect(g.find(x => x.name === 'paper')!.uebung).toBe(true);
+    expect(g.find(x => x.name === 'phemex')!.uebung).toBe(false);
+  });
+
+  it('gilt eine gemischte Gruppe nicht als Übung', () => {
+    // Kommt vor, wenn eine Börse zwischendurch umgestellt wurde.
+    const g = dienst.gruppiert([
+      t({ boerse: 'phemex', uebung: true }),
+      t({ boerse: 'phemex', uebung: false }),
+    ], 'boerse');
+
+    expect(g[0]!.uebung).toBe(false);
+  });
+
+  it('rechnet je Gruppe dasselbe wie fürs Ganze', () => {
+    const trades = [
+      t({ boerse: 'phemex', ergebnis: 100, rVielfaches: 1 }),
+      t({ boerse: 'phemex', ergebnis: -50, rVielfaches: -0.5 }),
+    ];
+
+    const gruppe = dienst.gruppiert(trades, 'boerse')[0]!.kennzahlen;
+    const ganz = dienst.kennzahlen(trades);
+
+    // Es gibt keine zweite Rechnung, die auseinanderlaufen könnte.
+    expect(gruppe).toEqual(ganz);
+  });
+
+  it('kommt mit einer leeren Liste zurecht', () => {
+    expect(dienst.gruppiert([], 'boerse')).toEqual([]);
+  });
+});
+
+// ============================================================
+// Kalender — Ergebnis je Tag
+// ============================================================
+
+describe('jeTag — Kalenderdaten', () => {
+  let verzeichnis: string;
+  let store: SqliteStore;
+  let dienst: KennzahlenService;
+
+  beforeEach(() => {
+    verzeichnis = mkdtempSync(join(tmpdir(), 'kalender-'));
+    store = new SqliteStore(join(verzeichnis, 'bot.db'));
+    dienst = new KennzahlenService(store);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(verzeichnis, { recursive: true, force: true });
+  });
+
+  function t(beendet: string | null, ergebnis: number, risiko = 100): TradeInR {
+    return {
+      planId: `p${Math.random()}`, symbol: 'BTCUSDT', richtung: 'long',
+      strategie: 'A', signalId: 's', boerse: 'paper', quelle: 'signal',
+      uebung: true, begonnen: null, beendet, dauerMinuten: 60,
+      menge: 1, einstiegsPreis: 100, risiko,
+      ergebnis, rVielfaches: risiko > 0 ? ergebnis / risiko : null,
+      tpsErreicht: ergebnis > 0 ? 1 : 0, slGetroffen: ergebnis < 0,
+    };
+  }
+
+  it('fasst nach dem Tag des Schließens zusammen', () => {
+    const tage = dienst.jeTag([
+      t('2026-11-01T08:00:00Z', 50),
+      t('2026-11-01T18:00:00Z', -20),
+      t('2026-11-03T12:00:00Z', 30),
+    ]);
+
+    expect(tage).toHaveLength(2);
+    expect(tage[0]!.tag).toBe('2026-11-01');
+    expect(tage[0]!.trades).toBe(2);
+    expect(tage[0]!.gewinner).toBe(1);
+    expect(tage[0]!.ergebnis).toBeCloseTo(30, 2);
+    expect(tage[1]!.tag).toBe('2026-11-03');
+  });
+
+  it('gibt die Tage aufsteigend zurück', () => {
+    const tage = dienst.jeTag([
+      t('2026-11-05T10:00:00Z', 10),
+      t('2026-11-01T10:00:00Z', 20),
+      t('2026-11-03T10:00:00Z', 30),
+    ]);
+    expect(tage.map(x => x.tag)).toEqual(['2026-11-01', '2026-11-03', '2026-11-05']);
+  });
+
+  it('rechnet den ROI auf das eingegangene Risiko', () => {
+    // 50 Gewinn auf 200 Risiko = 25 %.
+    const tage = dienst.jeTag([t('2026-11-01T10:00:00Z', 50, 200)]);
+    expect(tage[0]!.roiPct).toBeCloseTo(25, 2);
+  });
+
+  // Ohne bekanntes Risiko keine Prozentangabe — eine erfundene
+  // Bezugsgröße wäre schlechter als gar keine.
+  it('lässt den ROI weg, wenn kein Risiko bekannt ist', () => {
+    const ohne = t('2026-11-01T10:00:00Z', 50);
+    ohne.risiko = null;
+    expect(dienst.jeTag([ohne])[0]!.roiPct).toBeNull();
+  });
+
+  it('übergeht Trades ohne Schlusszeitpunkt', () => {
+    // Ein laufender Trade hat noch kein Tagesergebnis.
+    expect(dienst.jeTag([t(null, 50)])).toEqual([]);
+  });
+
+  it('summiert die R-Vielfachen des Tages', () => {
+    const tage = dienst.jeTag([
+      t('2026-11-01T08:00:00Z', 100, 100),   // +1 R
+      t('2026-11-01T09:00:00Z', -50, 100),   // −0,5 R
+    ]);
+    expect(tage[0]!.summeR).toBeCloseTo(0.5, 4);
+  });
+
+  it('kennzeichnet reine Übungstage', () => {
+    const echt = t('2026-11-02T10:00:00Z', 10);
+    echt.uebung = false;
+
+    const tage = dienst.jeTag([t('2026-11-01T10:00:00Z', 10), echt]);
+    expect(tage[0]!.uebung).toBe(true);
+    expect(tage[1]!.uebung).toBe(false);
   });
 });

@@ -37,9 +37,22 @@ export class KeineZugangsdatenError extends Error {
  * `paper` liefert den Uebungsbroker; er handelt nichts, sondern rechnet
  * gegen Kurse. Alles andere braucht hinterlegte Zugangsdaten.
  *
- * Steht `nurUebungsbetrieb`, wird ausnahmslos der Uebungsbroker
- * geliefert — gleich welche Boerse verlangt wurde. Siehe die
- * Begruendung an `BotConfig.nurUebungsbetrieb`.
+ * ## Wer entscheidet ueber echten Handel
+ *
+ * Jede Boerse fuer sich — nicht mehr ein Schalter fuer alles. Die
+ * Entscheidung faellt in `SqliteStore.boerseUebt()` und kommt hier
+ * als `uebtDieseBoerse` an.
+ *
+ * `config.nurUebungsbetrieb` wirkt weiterhin, aber nur noch **nach
+ * unten**: Steht es, uebt alles, unabhaengig von der Einstellung je
+ * Boerse. Das ist kein Widerspruch zur Umstellung, sondern ihr
+ * Rueckfall — eine bestehende Einrichtung, die den Schalter gesetzt
+ * hat, soll durch das Update nicht ploetzlich echt handeln.
+ *
+ * **Ohne Auskunft wird geuebt.** Wird `uebtDieseBoerse` nicht
+ * uebergeben, nimmt diese Funktion Uebungsbetrieb an. Jeder Aufrufer,
+ * der die Frage nicht beantwortet, bekommt den sicheren Fall — nicht
+ * den riskanten.
  */
 export function createBroker(
   config: BotConfig,
@@ -50,8 +63,17 @@ export function createBroker(
    * eigenes an — dann gehen Ergebnisse bei jedem Neuaufbau verloren.
    */
   konto?: PaperAccount,
+  /**
+   * Uebt diese Boerse? Fehlt die Angabe, gilt Uebungsbetrieb.
+   *
+   * Siehe `SqliteStore.boerseUebt()` — dort steht, warum jede
+   * Unklarheit auf die sichere Seite faellt.
+   */
+  uebtDieseBoerse?: boolean,
 ): BrokerAdapter {
-  if (config.nurUebungsbetrieb || exchangeId === 'paper') {
+  const uebt = uebtDieseBoerse ?? true;
+
+  if (config.nurUebungsbetrieb || uebt || exchangeId === 'paper') {
     return new PaperBroker({
       priceSource: 'phemex',
       startkapital: { [config.uebungsWaehrung]: config.uebungsKapital },
@@ -117,8 +139,41 @@ export class BrokerRegistry {
       price?: number | null;
       stopPrice?: number | null;
       reduceOnly?: boolean;
+      leverage?: number | null;
     }>,
+    /**
+     * Uebt diese Boerse?
+     *
+     * Kommt aus `SqliteStore.boerseUebt()`. Fehlt die Auskunft,
+     * nimmt die Registry Uebungsbetrieb an — dieselbe Einbahn wie in
+     * `createBroker()`: Wer nicht antwortet, bekommt den sicheren Fall.
+     */
+    private readonly uebtBoerse?: (exchangeId: string) => boolean,
   ) {}
+
+  /**
+   * Sind fuer diese Boerse Zugangsdaten hinterlegt?
+   *
+   * Fuer die Oberflaeche: Echter Handel ohne Zugangsdaten endet bei
+   * jedem Plan in einem Fehler — das gehoert gesagt, bevor jemand
+   * umstellt, nicht danach.
+   */
+  hatZugangsdaten(exchangeId: string): boolean {
+    if (exchangeId === 'paper') return true;
+    const c = this.config.exchanges[exchangeId];
+    return Boolean(c?.apiKey && c?.apiSecret);
+  }
+
+  /** Uebt diese Boerse? Ohne Auskunftgeber: ja. */
+  uebt(exchangeId: string): boolean {
+    if (this.config.nurUebungsbetrieb) return true;
+    if (!this.uebtBoerse) return true;
+    try {
+      return this.uebtBoerse(exchangeId);
+    } catch {
+      return true;
+    }
+  }
 
   /** Nach einer Aenderung der Einstellungen: alles verwerfen und neu aufbauen. */
   async reconfigure(config: BotConfig): Promise<void> {
@@ -132,17 +187,22 @@ export class BrokerRegistry {
    * Marktart nicht bedient.
    */
   async get(exchangeId: string, marketType?: BrokerMarketType): Promise<BrokerAdapter> {
-    // Im Uebungsbetrieb teilen sich alle Boersen einen Zugang. Sonst
-    // entstuende je angefragter Boerse ein eigener Uebungsbroker mit
-    // eigenem Positionsbestand — und ein Plan auf "bybit" saehe die
-    // Positionen eines Plans auf "okx" nicht.
-    const key = this.config.nurUebungsbetrieb
-      ? 'paper:auto'
-      : `${exchangeId}:${marketType ?? 'auto'}`;
+    const uebt = this.uebt(exchangeId);
+
+    // **Alle uebenden Boersen teilen sich EINEN Zugang.**
+    //
+    // Sonst entstuende je angefragter Boerse ein eigener Uebungsbroker
+    // mit eigenem Positionsbestand — und ein Plan auf "bybit" saehe
+    // die Positionen eines Plans auf "okx" nicht. Das Uebungskonto ist
+    // eines; sein Kapital laesst sich nicht sinnvoll aufteilen, ohne
+    // dass die Groessenbemessung jedes Trades fragwuerdig wird.
+    //
+    // Echte Boersen bekommen je Marktart ihren eigenen Zugang.
+    const key = uebt ? 'paper:auto' : `${exchangeId}:${marketType ?? 'auto'}`;
 
     let broker = this.broker.get(key);
     if (!broker) {
-      broker = createBroker(this.config, exchangeId, marketType, this.uebungskonto);
+      broker = createBroker(this.config, exchangeId, marketType, this.uebungskonto, uebt);
 
       // Dem frisch gebauten Uebungsbroker sein Orderbuch zurueckgeben.
       if (broker instanceof PaperBroker && this.liegendeOrders) {

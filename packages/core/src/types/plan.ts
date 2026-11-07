@@ -108,6 +108,35 @@ export interface EntryZone {
 // Take Profits (per-TP Features)
 // ============================================================
 
+/**
+ * Worauf sich der Prozentsatz eines Take-Profits bezieht.
+ *
+ * `eingestiegen` — auf die GESAMTE eingestiegene Menge.
+ * `rest`         — auf das, was zum Zeitpunkt dieses Ziels noch offen ist.
+ *
+ * Der Unterschied ist erheblich. Vier Ziele zu je 25 %:
+ *
+ * | | `eingestiegen` | `rest` |
+ * |---|---|---|
+ * | TP1 von 100 | 25 (Rest 75) | 25 (Rest 75) |
+ * | TP2 | 25 (Rest 50) | 18,75 (Rest 56,25) |
+ * | TP3 | 25 (Rest 25) | 14,06 (Rest 42,19) |
+ * | TP4 | 25 (Rest 0) | 10,55 (Rest 31,64) |
+ *
+ * Mit `eingestiegen` schliesst die Staffel die Position; mit `rest`
+ * bleibt immer etwas liegen. Beides ist gewollt — das eine beendet
+ * den Trade planmaessig, das andere laesst einen Rest fuer die lange
+ * Bewegung stehen.
+ *
+ * **`eingestiegen` heisst nicht "geplant".** Bezug ist die
+ * tatsaechlich gefuellte Menge, und die waechst mit jedem weiteren
+ * Einstieg. Genau deshalb muessen die Ziel-Orders nach jedem Einstieg
+ * nachgezogen werden (siehe `TradePlanMonitor.tpMengen`).
+ *
+ * Ohne Angabe gilt `eingestiegen` — so rechnete der Bot bisher.
+ */
+export type TpBezug = 'eingestiegen' | 'rest';
+
 export interface TakeProfit {
   price: number;
   percentage?: number;                       // % der Position zum Schliessen (TC-Stil)
@@ -115,6 +144,16 @@ export interface TakeProfit {
   size?: number;                             // optional absolute Groesse
   order_type?: 'limit' | 'market';
   status?: 'pending' | 'placed' | 'filled' | 'cancelled';
+
+  /**
+   * Bezugsgroesse des Prozentsatzes. Ohne Angabe `eingestiegen`.
+   *
+   * TC nennt das Feld in der Chart-Planung ebenso; ein Plan aus dem
+   * Journal bringt es mit. Faellt es weg, bleibt es bei der bisherigen
+   * Rechnung — ein alter Plan aendert durch das Update sein Verhalten
+   * nicht.
+   */
+  size_basis?: TpBezug;
 
   // Per-TP SL-Adjustment
   sl_adjust?: boolean;                       // SL nach diesem TP-Hit verschieben?

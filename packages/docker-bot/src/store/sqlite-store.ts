@@ -460,6 +460,57 @@ export class SqliteStore {
         PRIMARY KEY (symbol, seite)
       );
 
+      -- Einstellungen je Boerse.
+      --
+      -- Traegt vor allem, OB auf dieser Boerse echt gehandelt wird.
+      -- Frueher entschied das ein einziger Schalter fuer alles
+      -- (NUR_UEBUNGSBETRIEB); jetzt entscheidet jede Boerse fuer sich.
+      --
+      -- "uebungsbetrieb" steht auf 1. Das ist nicht Geschmack, sondern
+      -- die tragende Sicherung: Mit dem globalen Riegel ist der
+      -- einzelne Hebel entfallen, der im Zweifel alles stilllegte. Eine
+      -- Boerse, die hier nicht eingetragen ist oder deren Eintrag
+      -- unvollstaendig bleibt, darf deshalb NIEMALS echt handeln --
+      -- siehe "boerseUebt()".
+      CREATE TABLE IF NOT EXISTS boersen_einstellung (
+        exchange TEXT PRIMARY KEY,
+        uebungsbetrieb INTEGER NOT NULL DEFAULT 1,
+        aktiv INTEGER NOT NULL DEFAULT 1,
+        notiz TEXT,
+        geaendert_am TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      -- Woher ein Plan kommt -- und auf welcher Boerse er landet.
+      --
+      -- "source" in bot_trade_plans unterscheidet nur tc/local/signal.
+      -- Das genuegt nicht: Synaptrix und TradingView kommen beide als
+      -- 'signal' an, sollen aber auf verschiedenen Boersen handeln
+      -- koennen.
+      --
+      -- Zugeordnet wird ueber "erkennung":
+      --   art='strategie'  -> Mustervergleich auf das Feld "strategy"
+      --   art='pfad'       -> der Webhook-Pfad, unter dem es eintraf
+      --   art='quelle'     -> die Herkunft selbst (tc, local)
+      --
+      -- "rang" entscheidet bei mehreren Treffern: kleiner gewinnt. So
+      -- laesst sich eine genaue Regel vor eine allgemeine stellen,
+      -- ohne die Reihenfolge der Eintraege zu beachten.
+      CREATE TABLE IF NOT EXISTS signalquelle (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        art TEXT NOT NULL CHECK(art IN ('strategie','pfad','quelle')),
+        erkennung TEXT NOT NULL,
+        exchange TEXT NOT NULL,
+        rang INTEGER NOT NULL DEFAULT 100,
+        aktiv INTEGER NOT NULL DEFAULT 1,
+        notiz TEXT,
+        angelegt_am TEXT NOT NULL DEFAULT (datetime('now')),
+        geaendert_am TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_signalquelle_zuordnung
+        ON signalquelle(aktiv, rang, art);
+
       CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_inbox_signal_id ON signal_inbox(signal_id);
       CREATE INDEX IF NOT EXISTS idx_signal_inbox_status ON signal_inbox(status);
       CREATE INDEX IF NOT EXISTS idx_signal_inbox_symbol ON signal_inbox(symbol);
@@ -943,8 +994,37 @@ export class SqliteStore {
     /** Herkunftsnachweis aus dem Signal (JSON), siehe Weg B. */
     signal_origin?: string | null;
   }): void {
+    // ============================================================
+    // ON CONFLICT DO UPDATE — niemals INSERT OR REPLACE
+    // ============================================================
+    //
+    // `INSERT OR REPLACE` ist in SQLite ein DELETE gefolgt von einem
+    // INSERT. Mit `foreign_keys = ON` und
+    //
+    //     FOREIGN KEY (trade_plan_id) REFERENCES bot_trade_plans(id)
+    //       ON DELETE CASCADE
+    //
+    // an `bot_trade_plan_orders` loescht jedes Speichern eines Plans
+    // damit **saemtliche Orders dieses Plans**.
+    //
+    // Der TcPlanSyncService ruft diese Methode bei jedem Abgleich,
+    // also alle 30 Sekunden. Daraus wurde eine Schleife:
+    //
+    //     Abgleich -> REPLACE -> Orders weg -> der Monitor sieht
+    //     nichts Platziertes -> legt alle Einstiege neu -> 30 s ->
+    //     von vorn
+    //
+    // Am 04.11.2026 stand ein BTCUSDT-Plan deshalb dreimal mit
+    // "Einstieg 1/2/3 platziert" im Verlauf (20:25, 21:04, 21:22),
+    // waehrend die Order-Tabelle leer blieb. Einen Tag zuvor war es
+    // schlimmer: Weil `offenePosition()` aus den Orders rechnet und
+    // die geloescht waren, hielt der Storno-Pfad eine offene Position
+    // fuer geschlossen und liess sie ungesichert stehen.
+    //
+    // `ON CONFLICT DO UPDATE` aendert die bestehende Zeile, statt sie
+    // zu ersetzen. Kein DELETE, keine Kaskade, die Orders bleiben.
     this.db.prepare(`
-      INSERT OR REPLACE INTO bot_trade_plans (
+      INSERT INTO bot_trade_plans (
         id, source, tc_user_id, exchange, exchange_account_id,
         symbol, asset_symbol, quote_currency, market_type, direction,
         leverage, total_size, total_margin, entry_strategy,
@@ -955,6 +1035,38 @@ export class SqliteStore {
         last_synced_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         datetime('now'), datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        source = excluded.source,
+        tc_user_id = excluded.tc_user_id,
+        exchange = excluded.exchange,
+        exchange_account_id = excluded.exchange_account_id,
+        symbol = excluded.symbol,
+        asset_symbol = excluded.asset_symbol,
+        quote_currency = excluded.quote_currency,
+        market_type = excluded.market_type,
+        direction = excluded.direction,
+        leverage = excluded.leverage,
+        total_size = excluded.total_size,
+        total_margin = excluded.total_margin,
+        entry_strategy = excluded.entry_strategy,
+        entry_orders = excluded.entry_orders,
+        entry_zones = excluded.entry_zones,
+        take_profits = excluded.take_profits,
+        stop_loss_price = excluded.stop_loss_price,
+        stop_loss_type = excluded.stop_loss_type,
+        trailing_stop_pct = excluded.trailing_stop_pct,
+        trailing_stop_activation = excluded.trailing_stop_activation,
+        trailing_stop_size_pct = excluded.trailing_stop_size_pct,
+        activation_conditions = excluded.activation_conditions,
+        executed_orders = excluded.executed_orders,
+        execution_mode = excluded.execution_mode,
+        status = excluded.status,
+        bot_enabled = excluded.bot_enabled,
+        notes = excluded.notes,
+        signal_trigger = excluded.signal_trigger,
+        signal_origin = excluded.signal_origin,
+        last_synced_at = datetime('now'),
+        updated_at = datetime('now')
     `).run(
       plan.id, plan.source, plan.tc_user_id ?? null, plan.exchange ?? null, plan.exchange_account_id ?? null,
       plan.symbol, plan.asset_symbol ?? null, plan.quote_currency ?? 'USDT',
@@ -1667,9 +1779,190 @@ export class SqliteStore {
     return ergebnis.changes;
   }
 
+  // ============================================================
+  // Boersen-Einstellungen
+  // ============================================================
+
+  /**
+   * **Uebt diese Boerse — oder geht ein Auftrag wirklich hinaus?**
+   *
+   * Die wichtigste Frage im ganzen Bot. Fruehen entschied sie ein
+   * einziger Schalter (NUR_UEBUNGSBETRIEB) fuer alles; seit jede
+   * Boerse fuer sich entscheidet, ist dieser eine Hebel entfallen.
+   *
+   * Damit wird die Vorgabe zur tragenden Sicherung: **Was nicht
+   * ausdruecklich und vollstaendig auf echten Handel gestellt ist,
+   * uebt.** Das deckt die Faelle ab, in denen frueher der globale
+   * Riegel half:
+   *
+   *   - Boerse gar nicht eingetragen        -> uebt
+   *   - Eintrag vorhanden, Feld leer/NULL   -> uebt
+   *   - Datenbank nicht lesbar              -> uebt
+   *   - 'paper' als Boerse genannt          -> uebt (immer)
+   *
+   * Nur eine Zeile mit `uebungsbetrieb = 0` laesst echten Handel zu.
+   * Jede Unklarheit faellt auf die sichere Seite.
+   */
+  boerseUebt(exchange: string): boolean {
+    const name = String(exchange ?? '').trim().toLowerCase();
+
+    // Der Uebungsbroker uebt per Definition.
+    if (!name || name === 'paper') return true;
+
+    try {
+      const zeile = this.db.prepare(
+        'SELECT uebungsbetrieb FROM boersen_einstellung WHERE exchange = ?',
+      ).get(name) as { uebungsbetrieb?: number } | undefined;
+
+      // Kein Eintrag: uebt. Eine Boerse, die niemand eingerichtet hat,
+      // darf kein Geld bewegen.
+      if (!zeile) return true;
+
+      // Ausdruecklich 0 — und nichts anderes — gibt frei.
+      return zeile.uebungsbetrieb !== 0;
+    } catch {
+      // Lieber eine Uebungsorder zuviel als eine echte zuwenig.
+      return true;
+    }
+  }
+
+  /** Alle Boersen-Einstellungen, fuer die Oberflaeche. */
+  boersenEinstellungen(): Array<Record<string, unknown>> {
+    return this.db.prepare(
+      'SELECT * FROM boersen_einstellung ORDER BY exchange',
+    ).all() as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Eine Boerse einrichten oder aendern.
+   *
+   * `uebungsbetrieb` wird ausdruecklich verlangt — kein Standardwert
+   * an dieser Stelle. Wer eine Boerse eintraegt, soll sich zu der
+   * Frage aeussern muessen.
+   */
+  setzeBoersenEinstellung(e: {
+    exchange: string; uebungsbetrieb: boolean; aktiv?: boolean; notiz?: string | null;
+  }): void {
+    const name = String(e.exchange ?? '').trim().toLowerCase();
+    if (!name) throw new Error('Boerse ohne Namen');
+    if (name === 'paper' && !e.uebungsbetrieb) {
+      throw new Error('Der Uebungsbroker kann nicht auf echten Handel gestellt werden');
+    }
+
+    this.db.prepare(`
+      INSERT INTO boersen_einstellung (exchange, uebungsbetrieb, aktiv, notiz, geaendert_am)
+      VALUES (?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(exchange) DO UPDATE SET
+        uebungsbetrieb = excluded.uebungsbetrieb,
+        aktiv = excluded.aktiv,
+        notiz = excluded.notiz,
+        geaendert_am = datetime('now')
+    `).run(name, e.uebungsbetrieb ? 1 : 0, e.aktiv === false ? 0 : 1, e.notiz ?? null);
+  }
+
+  loescheBoersenEinstellung(exchange: string): boolean {
+    const r = this.db.prepare('DELETE FROM boersen_einstellung WHERE exchange = ?')
+      .run(String(exchange ?? '').trim().toLowerCase());
+    return r.changes > 0;
+  }
+
+  // ============================================================
+  // Signalquellen
+  // ============================================================
+
+  /**
+   * Welche Boerse gilt fuer dieses Signal?
+   *
+   * Geprueft wird in der Reihenfolge des Rangs; der erste Treffer
+   * gewinnt. `null`, wenn keine Regel passt — dann entscheidet der
+   * Aufrufer (ueblicherweise die voreingestellte Boerse).
+   *
+   * Der Mustervergleich auf `strategie` ist absichtlich einfach
+   * gehalten: Gleichheit oder ein Sternchen am Ende. Regulaere
+   * Ausdruecke aus der Oberflaeche einzulesen hiesse, einem
+   * Konfigurationsfehler die Macht zu geben, den Signaleingang
+   * lahmzulegen.
+   */
+  boerseFuerSignal(args: {
+    strategie?: string | null; pfad?: string | null; quelle?: string | null;
+  }): { exchange: string; quelle: string } | null {
+    try {
+      const regeln = this.db.prepare(
+        'SELECT name, art, erkennung, exchange FROM signalquelle WHERE aktiv = 1 ORDER BY rang ASC, name ASC',
+      ).all() as Array<{ name: string; art: string; erkennung: string; exchange: string }>;
+
+      for (const r of regeln) {
+        const muster = String(r.erkennung ?? '').trim();
+        if (!muster) continue;
+
+        const wert = r.art === 'strategie' ? args.strategie
+          : r.art === 'pfad' ? args.pfad
+            : args.quelle;
+        if (typeof wert !== 'string' || !wert) continue;
+
+        if (passtAufMuster(wert, muster)) {
+          return { exchange: String(r.exchange).trim().toLowerCase(), quelle: r.name };
+        }
+      }
+    } catch {
+      // Eine kaputte Regel darf den Signaleingang nicht aufhalten —
+      // der Aufrufer faellt dann auf die Vorgabe zurueck.
+    }
+    return null;
+  }
+
+  signalquellen(): Array<Record<string, unknown>> {
+    return this.db.prepare(
+      'SELECT * FROM signalquelle ORDER BY rang ASC, name ASC',
+    ).all() as Array<Record<string, unknown>>;
+  }
+
+  setzeSignalquelle(q: {
+    id: string; name: string; art: 'strategie' | 'pfad' | 'quelle';
+    erkennung: string; exchange: string; rang?: number; aktiv?: boolean; notiz?: string | null;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO signalquelle (id, name, art, erkennung, exchange, rang, aktiv, notiz, geaendert_am)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name, art = excluded.art, erkennung = excluded.erkennung,
+        exchange = excluded.exchange, rang = excluded.rang, aktiv = excluded.aktiv,
+        notiz = excluded.notiz, geaendert_am = datetime('now')
+    `).run(
+      q.id, q.name, q.art, q.erkennung.trim(),
+      String(q.exchange).trim().toLowerCase(),
+      q.rang ?? 100, q.aktiv === false ? 0 : 1, q.notiz ?? null,
+    );
+  }
+
+  loescheSignalquelle(id: string): boolean {
+    return this.db.prepare('DELETE FROM signalquelle WHERE id = ?').run(id).changes > 0;
+  }
+
   // --- Cleanup ---
 
   close(): void {
     this.db.close();
   }
+}
+
+/**
+ * Trifft dieses Muster auf den Wert zu?
+ *
+ * Bewusst klein gehalten — Gleichheit, oder ein Sternchen am Ende als
+ * Praefix ("MBCMA*" trifft "MBCMA-f23"). Gross- und Kleinschreibung
+ * spielen keine Rolle, denn Strategienamen kommen so, wie sie jemand
+ * in TradingView getippt hat.
+ *
+ * Keine regulaeren Ausdruecke: Ein Muster aus der Oberflaeche landet
+ * ungeprueft hier, und ein ungluecklicher Ausdruck koennte den
+ * Signaleingang bei jedem Treffer minutenlang beschaeftigen.
+ */
+function passtAufMuster(wert: string, muster: string): boolean {
+  const w = wert.trim().toLowerCase();
+  const m = muster.trim().toLowerCase();
+  if (!m) return false;
+  if (m === '*') return true;
+  if (m.endsWith('*')) return w.startsWith(m.slice(0, -1));
+  return w === m;
 }

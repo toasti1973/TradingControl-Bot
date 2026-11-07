@@ -8,6 +8,14 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <link rel="stylesheet" href="/css/style.css?v=20260404">
+
+  <!-- Installierbar als Web-App (PWA). Siehe sw.js: Es wird nur die
+       Hülle gespeichert, niemals Kurse oder Planstände. -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 </head>
 <body>
 
@@ -38,35 +46,59 @@
         <h1>TC Bot</h1>
         <span>TradingControl</span>
       </div>
+
+      <!--
+        Betriebsmodus — die wichtigste Angabe der ganzen Oberfläche.
+
+        Seit jede Börse für sich entscheidet, ob sie übt (Regel 5a),
+        gibt es keinen einzelnen Schalter mehr, der alles stilllegt.
+        Diese Zeile ist damit die Stelle, an der ein versehentlich
+        freigeschalteter Echthandel auffällt, bevor er handelt.
+      -->
+      <div id="betriebsmodus" class="betriebsmodus"></div>
+      <!--
+        Gegliedert statt aufgereiht.
+
+        Zehn gleichrangige Einträge, von denen drei „Plan" heißen —
+        ihren Unterschied musste man kennen. Jetzt stehen sie unter
+        einer Überschrift beieinander; die Seiten selbst bleiben
+        dieselben.
+      -->
       <a id="nav-dashboard" class="nav-item active" href="#dashboard" onclick="navigate('dashboard')">
-        <span class="nav-text">Dashboard</span>
+        <span class="nav-text">Übersicht</span>
       </a>
-      <a id="nav-plans" class="nav-item" href="#plans" onclick="navigate('plans')">
-        <span class="nav-text">Plaene</span>
-      </a>
-      <a id="nav-planning" class="nav-item" href="#planning" onclick="navigate('planning')">
-        <span class="nav-text">Tradeplanung</span>
-      </a>
-      <a id="nav-tradeplans" class="nav-item" href="#tradeplans" onclick="navigate('tradeplans')">
+
+      <span class="nav-gruppe">Handel</span>
+      <a id="nav-tradeplans" class="nav-item nav-unter" href="#tradeplans" onclick="navigate('tradeplans')">
         <span class="nav-text">Trade Plans</span>
       </a>
-      <a id="nav-signale" class="nav-item" href="#signale" onclick="navigate('signale')">
+      <a id="nav-plans" class="nav-item nav-unter" href="#plans" onclick="navigate('plans')">
+        <span class="nav-text">Pläne</span>
+      </a>
+      <a id="nav-planning" class="nav-item nav-unter" href="#planning" onclick="navigate('planning')">
+        <span class="nav-text">Tradeplanung</span>
+      </a>
+
+      <span class="nav-gruppe">Auswerten</span>
+      <a id="nav-signale" class="nav-item nav-unter" href="#signale" onclick="navigate('signale')">
         <span class="nav-text">Signale</span>
       </a>
-      <a id="nav-trades" class="nav-item" href="#trades" onclick="navigate('trades')">
+      <a id="nav-trades" class="nav-item nav-unter" href="#trades" onclick="navigate('trades')">
         <span class="nav-text">Trade History</span>
       </a>
-      <a id="nav-auswertung" class="nav-item" href="#auswertung" onclick="navigate('auswertung')">
+      <a id="nav-auswertung" class="nav-item nav-unter" href="#auswertung" onclick="navigate('auswertung')">
         <span class="nav-text">Auswertung</span>
       </a>
-      <a id="nav-copytrading" class="nav-item" href="#copytrading" onclick="navigate('copytrading')">
+
+      <span class="nav-gruppe">System</span>
+      <a id="nav-copytrading" class="nav-item nav-unter" href="#copytrading" onclick="navigate('copytrading')">
         <span class="nav-text">CopyTrading</span>
       </a>
-      <a id="nav-settings" class="nav-item" href="#settings" onclick="navigate('settings')">
+      <a id="nav-settings" class="nav-item nav-unter" href="#settings" onclick="navigate('settings')">
         <span class="nav-text">Einstellungen</span>
       </a>
-      <a id="nav-logs" class="nav-item" href="#logs" onclick="navigate('logs')">
-        <span class="nav-text">Logs</span>
+      <a id="nav-logs" class="nav-item nav-unter" href="#logs" onclick="navigate('logs')">
+        <span class="nav-text">Protokoll</span>
       </a>
       <div style="flex:1"></div>
       <a class="nav-item" href="#" onclick="logout()">
@@ -712,6 +744,42 @@
 
         <div id="aw-kennzahlen" class="cards" style="margin-bottom:16px"></div>
 
+        <!--
+          Leistung je Börse und Signalquelle.
+
+          Die Frage, die sich mit mehreren Börsen zuerst stellt. Aus
+          den Gesamtzahlen ist sie nicht zu lesen: Eine gute und eine
+          schlechte Quelle ergeben zusammen eine mittelmäßige.
+
+          Übung und Echthandel stehen getrennt — ihre Summe wäre eine
+          Zahl ohne Bedeutung.
+        -->
+        <div class="card" style="margin-bottom:24px">
+          <h3 class="karten-titel">Leistung nach Herkunft</h3>
+          <div id="lg-gruppen"></div>
+        </div>
+
+        <!--
+          Kalender. Ein Tag ist der Tag des SCHLIESSENS — dann wurde
+          das Ergebnis realisiert; der Einstieg kann Tage zurückliegen.
+        -->
+        <div class="card" style="margin-bottom:24px">
+          <div class="kal-leiste">
+            <h3 class="karten-titel" style="margin:0">Kalender</h3>
+            <div id="kal-kopf" class="kal-kopf"></div>
+            <div class="kal-umschalter">
+              <button class="btn btn-secondary" onclick="kalUmschalten('pnl')">Ergebnis</button>
+              <button class="btn btn-secondary" onclick="kalUmschalten('roi')">ROI&nbsp;%</button>
+            </div>
+          </div>
+          <p class="form-hint" style="margin:4px 0 12px">
+            Die Summe sagt, was herauskam; der Prozentwert, ob der Einsatz es
+            wert war. Ein Punkt rechts oben kennzeichnet Übungstage.
+          </p>
+          <div id="kal-raster"></div>
+          <div id="kal-tagesliste"></div>
+        </div>
+
         <!-- Kontoverlauf -->
         <div class="card" style="margin-bottom:24px">
           <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
@@ -1017,6 +1085,48 @@
           </div>
         </div>
 
+        <!--
+          Handelsplätze: welche Börse übt, und welche Signalquelle
+          landet wo.
+
+          Zwei getrennte Fragen, die hier beieinanderstehen, weil man
+          sie beim Einrichten zusammen beantwortet. Die erste ist die
+          gewichtigere: Seit jede Börse für sich entscheidet, gibt es
+          keinen einzelnen Schalter mehr, der alles stilllegt. Was
+          nicht ausdrücklich auf echten Handel steht, übt — und das
+          muss man hier sehen können, ohne zu suchen.
+        -->
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Börsen &mdash; Übung oder echter Handel</h3>
+          <p class="form-hint" style="margin:0 0 12px">
+            Jede Börse entscheidet für sich. <strong>Ohne Eintrag wird geübt</strong> &mdash;
+            es gibt keinen Schalter mehr, der alles auf einmal stilllegt.
+          </p>
+          <div id="hp-boersen"></div>
+        </div>
+
+        <div class="card settings-card">
+          <h3 class="settings-section-title">Signalquellen &mdash; wer handelt wo</h3>
+          <p class="form-hint" style="margin:0 0 12px">
+            Ordnet eingehende Signale einer Börse zu. Geprüft wird in der
+            Reihenfolge des Rangs &mdash; der kleinste gewinnt. Das Sternchen
+            am Ende passt auf alles, was so beginnt (<code>MBCMA*</code>).
+            Diese Zuordnung schlägt das Feld <code>exchange</code> aus dem Signal.
+          </p>
+          <div id="hp-quellen"></div>
+
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border,#333)">
+            <label class="form-hint" for="hp-probe-wert">Probelauf &mdash; wo landet ein Signal?</label>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+              <input type="text" id="hp-probe-wert" placeholder="Strategiename, z. B. MBCMA-f23"
+                     style="flex:1;min-width:220px;padding:6px 10px;font-size:13px">
+              <button class="btn btn-secondary" style="font-size:12px"
+                      onclick="hpProbe()">Prüfen</button>
+            </div>
+            <div id="hp-probe-ergebnis" class="form-hint" style="margin-top:8px"></div>
+          </div>
+        </div>
+
         <!-- Boersen -->
         <div class="card settings-card">
           <h3 class="settings-section-title">Boersen</h3>
@@ -1223,6 +1333,14 @@
 
     </main>
 
+    <!--
+      Statuszeile — immer sichtbar, unaufdringlich.
+
+      Beantwortet die Frage "womit arbeite ich gerade?", ohne dass
+      jemand ins Protokoll sieht. Vorbild: Marketdesk.
+    -->
+    <div id="statusleiste" class="statusleiste"></div>
+
     <!-- Detailansicht eines Plans -->
     <div id="plan-detail-overlay" class="plan-overlay" style="display:none" onclick="planDetailSchliessen(event)">
       <div class="plan-form-container" style="max-width:860px" onclick="event.stopPropagation()">
@@ -1246,6 +1364,23 @@
   <script src="/js/chart.js?v=202610251115"></script>
   <script src="/js/signale.js?v=202610251115"></script>
   <script src="/js/auswertung.js?v=202610261500"></script>
+  <script src="/js/handelsplaetze.js?v=202611031100"></script>
+  <script src="/js/logos.js?v=202611041000"></script>
+  <script src="/js/uebersicht.js?v=202611041000"></script>
   <script src="/js/app.js?v=202610251115"></script>
+
+  <script>
+    // Den Service Worker anmelden — er macht die Anwendung
+    // installierbar. Schlägt es fehl, ändert sich nichts: Die Seite
+    // läuft ohne ihn genauso, sie lässt sich nur nicht zum
+    // Startbildschirm hinzufügen.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {
+          /* ohne ist auch gut */
+        });
+      });
+    }
+  </script>
 </body>
 </html>

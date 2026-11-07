@@ -29,6 +29,7 @@ import { PaperAccountService } from './services/paper-account-service.js';
 import { SignalService } from './services/signal-service.js';
 import { createSignalWebhookRouter } from './web/routes/signal-webhook.js';
 import { createSignalsRouter } from './web/routes/signals.js';
+import { createHandelsplaetzeRouter } from './web/routes/handelsplaetze.js';
 import { createKennzahlenRouter } from './web/routes/kennzahlen.js';
 import { createUebungskontoRouter } from './web/routes/uebungskonto.js';
 import { KerzenService } from './services/kerzen-service.js';
@@ -127,6 +128,9 @@ async function main() {
       // Fuellung mit 1 — siehe OrderParams.leverage.
       leverage: o.plan_leverage as number | null,
     })),
+    // Uebt diese Boerse? Die Antwort steht in der Datenbank, je
+    // Boerse. Ohne Eintrag: ja — siehe SqliteStore.boerseUebt().
+    (exchangeId: string) => store.boerseUebt(exchangeId),
   );
 
   // Kerzen fuer die Chart-Ansicht — oeffentliche Marktdaten, ohne Zugangsdaten.
@@ -333,13 +337,14 @@ async function main() {
   app.use(createDashboardRouter(botService, store, settingsService, planMonitor));
   app.use(createPlansRouter(botService, store, planMonitor));
   app.use(createTradesRouter(store));
-  app.use(createSettingsRouter(settingsService, botService, logger, telegramService));
+  app.use(createSettingsRouter(settingsService, botService, logger, telegramService, brokers));
   app.use(createLogsRouter());
   app.use(createLocalPlansRouter(store, botService));
   app.use(copytradingRoutes(store, ctService, settingsService));
   app.use(createTradePlansRouter(store, planMonitor, tcPlanSync, kerzenDienst));
   app.use(createSignalsRouter(signalDienst, kapitalDienst, store, settingsService, logger));
   app.use(createKennzahlenRouter(store, kerzenDienst));
+  app.use(createHandelsplaetzeRouter(store, brokers, logger));
   app.use(createUebungskontoRouter(
     uebungskonto, kapitalDienst, logger, effectiveConfig.nurUebungsbetrieb,
   ));

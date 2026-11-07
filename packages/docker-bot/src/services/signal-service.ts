@@ -166,7 +166,7 @@ export class SignalService {
     // --- 1. Herkunft ---
     const herkunft = this.auth.pruefeHerkunft({
       geheimnisAusPfad: args.geheimnisAusPfad,
-      geheimnisAusRumpf: typeof args.payload.secret === 'string' ? args.payload.secret : undefined,
+      geheimnisAusRumpf: geheimnisAusRumpf(args.payload),
       signatur: args.signatur,
       roherRumpf: args.roherRumpf,
     });
@@ -270,7 +270,29 @@ export class SignalService {
     signal: TradeSignal,
     args: { roherRumpf: string; herkunftsAdresse?: string },
   ): Promise<SignalAufnahme> {
-    const boerse = signal.exchange ?? this.config.defaultExchange;
+    // **Welche Boerse?** Drei Quellen, in dieser Reihenfolge:
+    //
+    //   1. Eine eingerichtete Signalquelle (Tabelle `signalquelle`)
+    //   2. Das Feld `exchange` im Signal
+    //   3. Die voreingestellte Boerse
+    //
+    // Die Zuordnung ueber die Signalquelle steht vorn, weil sie die
+    // Entscheidung des Nutzers ist: Er hat festgelegt, dass die
+    // Signale dieses Gebers auf jene Boerse gehoeren. Das Feld im
+    // Signal ist dagegen die Meinung des Absenders — und ein
+    // Signalgeber soll nicht bestimmen koennen, wo gehandelt wird.
+    const zuordnung = this.store.boerseFuerSignal({
+      strategie: signal.strategy,
+      quelle: 'signal',
+    });
+    const boerse = zuordnung?.exchange ?? signal.exchange ?? this.config.defaultExchange;
+
+    if (zuordnung) {
+      this.logger.debug({
+        signalId: signal.signal_id, strategie: signal.strategy,
+        quelle: zuordnung.quelle, boerse,
+      }, 'Signalquelle zugeordnet');
+    }
 
     // Kontostand und Marktgrenzen. Beide duerfen fehlen — dann lehnt der
     // Umrechner ab beziehungsweise rechnet ohne Mindestgroessen.
@@ -346,7 +368,16 @@ export class SignalService {
       };
     }
 
-    const { plan, herkunft } = this.builder.build(skaliert, decision);
+    // Die zugeordnete Boerse in den Plan tragen — NACH
+    // `pruefeUnveraendert`, denn dort geht es um Groesse, Hebel und
+    // Preise, nicht um den Handelsplatz. Welche Boerse gemeint ist,
+    // entscheidet der Nutzer ueber die Signalquellen; haette der
+    // Builder weiter `signal.exchange` genommen, bliebe seine
+    // Zuordnung wirkungslos.
+    const { plan, herkunft } = this.builder.build(
+      zuordnung ? { ...skaliert, exchange: boerse } : skaliert,
+      decision,
+    );
 
     // Festhalten, wie weit der Markt von den Einstiegen entfernt war.
     const lage = await this.marktlage(plan);
@@ -874,7 +905,15 @@ export class SignalService {
         symbol: eintrag.symbol,
         direction: eintrag.direction ?? null,
         source_ip: eintrag.herkunftsAdresse ?? null,
-        raw_payload: eintrag.roherRumpf.slice(0, 20_000),
+        // Das Geheimnis wird vor dem Speichern unkenntlich gemacht.
+        //
+        // Der Datensatz wird vollstaendig abgelegt — zum Nachsehen,
+        // was ein Absender wirklich geschickt hat. Steht das
+        // Geheimnis darin (bei TradingView der uebliche Weg, siehe
+        // `geheimnisAusRumpf`), laege es damit im Klartext in der
+        // Datenbank und in jeder Sicherung. Geprueft wurde da
+        // laengst; zum Nachsehen braucht es den Wert nicht.
+        raw_payload: geheimnisUnkenntlich(eintrag.roherRumpf).slice(0, 20_000),
         status: eintrag.status,
         reason: eintrag.grund ?? null,
         warnings: eintrag.warnungen ?? [],
@@ -923,4 +962,53 @@ export class SignalService {
 function runde(wert: number, stellen: number): number {
   const faktor = Math.pow(10, stellen);
   return Math.round(wert * faktor) / faktor;
+}
+
+/**
+ * Das Geheimnis aus dem Datensatz — unter allen gebraeuchlichen Namen.
+ *
+ * Die Route kennt daneben den Weg ueber den Pfad
+ * (`/webhook/signal/<geheimnis>`), und der bleibt der empfohlene. Im
+ * Datensatz ist es aber verbreitet, weil die Webhook-Adresse in der
+ * Alarm-Verwaltung offen sichtbar ist und beim Weitergeben eines
+ * Alarms mitwandert.
+ *
+ * Gelesen wurde bisher allein `secret`. Wer sein Feld `geheimnis`
+ * nannte — naheliegend bei einer durchweg deutschen Oberflaeche —,
+ * bekam eine Abweisung ohne erkennbaren Grund: Das Geheimnis stand
+ * da, nur unter einem Namen, nach dem niemand sah.
+ */
+function geheimnisAusRumpf(payload: RawSignalPayload): string | undefined {
+  for (const feld of GEHEIMNIS_FELDER) {
+    const wert = payload[feld];
+    if (typeof wert === 'string' && wert.length > 0) return wert;
+  }
+  return undefined;
+}
+
+const GEHEIMNIS_FELDER = ['secret', 'geheimnis', 'passphrase', 'token', 'key'] as const;
+
+/**
+ * Ersetzt den Wert jedes Geheimnis-Feldes durch Sterne.
+ *
+ * Gearbeitet wird auf dem Text, nicht auf dem geparsten Objekt: Der
+ * rohe Datensatz wird so gespeichert, wie er ankam — mit seinen
+ * Zeilenumbruechen und seiner Feldreihenfolge. Genau das macht ihn
+ * zum Beleg. Ihn neu zu serialisieren naehme ihm diese Eigenschaft.
+ *
+ * **Nur die gespeicherte Fassung.** Die HMAC-Signatur wird ueber den
+ * unveraenderten Rumpf geprueft; wer hier eingriffe, machte jede
+ * Signatur ungueltig.
+ */
+function geheimnisUnkenntlich(roherRumpf: string): string {
+  let text = roherRumpf;
+  for (const feld of GEHEIMNIS_FELDER) {
+    // "feld" : "wert"  —  mit beliebigen Leerzeichen, Wert in
+    // doppelten Anfuehrungszeichen, maskierte Zeichen erlaubt.
+    text = text.replace(
+      new RegExp(`("${feld}"\\s*:\\s*")(?:[^"\\\\]|\\\\.)*(")`, 'gi'),
+      '$1***$2',
+    );
+  }
+  return text;
 }

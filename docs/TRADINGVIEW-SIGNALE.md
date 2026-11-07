@@ -357,6 +357,7 @@ können also ohne weiteres `rsi_wert` oder `kommentar` mitschicken.
 {
   "price": 52000,
   "percentage": 50,
+  "size_basis": "eingestiegen",
   "sl_adjust": true,
   "sl_new_price": 50000,
   "activate_trailing": false,
@@ -365,7 +366,59 @@ können also ohne weiteres `rsi_wert` oder `kommentar` mitschicken.
 ```
 
 `percentage` ist der Anteil der Position, der an diesem Preis geschlossen
-wird. Die Summe über alle Take-Profits darf 100 nicht überschreiten.
+wird.
+
+#### Worauf sich der Anteil bezieht
+
+`size_basis` entscheidet darüber. Zwei Werte:
+
+| Wert | Bezug |
+|---|---|
+| `eingestiegen` (Vorgabe) | die **gesamte** eingestiegene Menge |
+| `rest` | was **vor diesem Ziel** noch offen wäre |
+
+Vier Ziele zu je 25 % auf 100 Einheiten:
+
+| | `eingestiegen` | `rest` |
+|---|---|---|
+| TP1 | 25 | 25 |
+| TP2 | 25 | 18,75 |
+| TP3 | 25 | 14,06 |
+| TP4 | 25 | 10,55 |
+| **bleibt** | **0** | **31,64** |
+
+Mit `eingestiegen` schließt die Staffel die Position vollständig; mit
+`rest` bleibt ein Teil für die lange Bewegung stehen. Die Summe über
+alle Take-Profits darf bei `eingestiegen` 100 nicht überschreiten —
+bei `rest` ist das von selbst ausgeschlossen.
+
+Fehlt das Feld, gilt `eingestiegen`. Ein bestehender Plan ändert sein
+Verhalten dadurch nicht.
+
+**Bezug ist immer die tatsächlich gefüllte Menge, nie die geplante.**
+Kommt ein weiterer Einstieg hinzu, wachsen die Ziel-Orders an der
+Börse mit — der Bot nimmt die alte zurück und legt die größere neu.
+
+#### Feste Menge statt Anteil
+
+```json
+{ "price": 52000, "size": 0.05 }
+```
+
+`size` geht `percentage` vor. Eine feste Menge ist eine Ansage, kein
+Richtwert.
+
+#### Ziele mit Indikator-Bedingung
+
+Ein Take-Profit mit `trigger` kommt **nicht** ins Orderbuch — die
+Börse kennt keinen RSI. Er läuft über die Kursbeobachtung des Bots,
+und der Indikator wird im Augenblick des Treffers geprüft. Das ist
+der langsamere Weg: Zwischen zwei Kursabfragen kann ein Docht
+durchrutschen.
+
+Ziele ohne `trigger` liegen dagegen von Anfang an als Limit-Order an
+der Börse und werden zum Zielpreis gefüllt, auch wenn der Bot gerade
+nicht hinsieht.
 
 #### Zonen statt einzelner Einstiege
 

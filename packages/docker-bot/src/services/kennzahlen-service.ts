@@ -34,6 +34,35 @@ export interface TradeInR {
   strategie: string;
   signalId: string;
 
+  /**
+   * Die Boerse, auf der dieser Trade lief.
+   *
+   * Noetig, um die Leistung je Boerse auszuweisen. Bisher stand sie
+   * nur im Plan und wurde allein fuer die Kerzenabfrage gelesen —
+   * damit liess sich nicht beantworten, ob Phemex besser laeuft als
+   * Bybit.
+   */
+  boerse: string;
+
+  /**
+   * Woher der Plan kam: `tc`, `local` oder `signal`.
+   *
+   * Zusammen mit `strategie` ergibt das die Signalquelle. Ein
+   * `signal`-Plan von Synaptrix und einer von TradingView
+   * unterscheiden sich nur im Strategienamen.
+   */
+  quelle: string;
+
+  /**
+   * Lief dieser Trade im Uebungsbetrieb?
+   *
+   * **Uebungs- und Echtergebnisse duerfen nicht addiert werden.** Die
+   * Summe aus beidem ist eine Zahl ohne Bedeutung: Das eine ist
+   * Kapital, das andere eine Behauptung darueber, was geschehen
+   * waere. Die Auswertung weist sie deshalb getrennt aus.
+   */
+  uebung: boolean;
+
   /** Wann der erste Einstieg gefuellt wurde. */
   begonnen: string | null;
   /** Wann zuletzt geschlossen wurde. */
@@ -107,6 +136,32 @@ export interface Kennzahlen {
 }
 
 /** Ein Punkt der Kontoverlaufs-Kurve. */
+/** Kennzahlen einer Gruppe — je Boerse, Quelle oder Strategie. */
+export interface Gruppenzahl {
+  name: string;
+  nach: 'boerse' | 'quelle' | 'strategie';
+  /** Uebten ALLE Trades dieser Gruppe? Dann nicht mit echten mischen. */
+  uebung: boolean;
+  /** Auf welchen Boersen lief diese Gruppe? Bei `nach: 'boerse'` genau eine. */
+  boersen: string[];
+  kennzahlen: Kennzahlen;
+}
+
+/** Ergebnis eines Kalendertags. */
+export interface Tageszahl {
+  /** YYYY-MM-DD, der Tag des Schliessens. */
+  tag: string;
+  trades: number;
+  gewinner: number;
+  /** Realisiertes Ergebnis in Quote-Waehrung. */
+  ergebnis: number;
+  /** Ergebnis bezogen auf das an diesem Tag eingegangene Risiko. */
+  roiPct: number | null;
+  /** Summe der R-Vielfachen, soweit bekannt. */
+  summeR: number | null;
+  uebung: boolean;
+}
+
 export interface EquityPunkt {
   zeitpunkt: string;
   /** Kontostand nach dieser Buchung. */
@@ -180,12 +235,24 @@ export class KennzahlenService {
       const begonnen = this.ersteFuellung(orders, 'entry');
       const beendet = this.letzteFuellung(orders);
 
+      // 'unknown' liefert die Journal-Schnittstelle ohne zugeordnetes
+      // Konto; leer bleibt es bei von Hand angelegten Plaenen.
+      const boerseRoh = String(bp.exchange ?? '').trim().toLowerCase();
+      const boerse = !boerseRoh || boerseRoh === 'unknown' ? 'paper' : boerseRoh;
+
       liste.push({
         planId,
         symbol: String(bp.symbol),
         richtung,
         strategie: String(herkunft?.strategy ?? '–'),
         signalId: String(herkunft?.signal_id ?? '–'),
+        boerse,
+        quelle: String(bp.source ?? 'local'),
+        // Der Uebungsbroker laeuft unter 'paper'. Eine Boerse, die in
+        // den Einstellungen auf Uebung steht, traegt ihren eigenen
+        // Namen — dort kommt die Unterscheidung aus
+        // `boersen_einstellung`, nicht aus dem Plan.
+        uebung: boerse === 'paper' || this.store.boerseUebt(boerse),
         begonnen,
         beendet,
         dauerMinuten: minutenZwischen(begonnen, beendet),
@@ -206,6 +273,98 @@ export class KennzahlenService {
 
     liste.sort((a, b) => String(b.beendet ?? '').localeCompare(String(a.beendet ?? '')));
     return liste;
+  }
+
+  /**
+   * Dieselben Kennzahlen, aufgeteilt nach einem Merkmal.
+   *
+   * Beantwortet die Frage, die sich mit mehreren Boersen und
+   * Signalgebern zuerst stellt: **Welche laufen gut?** Die
+   * Gesamtzahlen sagen das nicht — eine gute und eine schlechte
+   * Quelle ergeben zusammen eine mittelmaessige.
+   *
+   * Gerechnet wird je Gruppe mit derselben Methode wie fuers Ganze;
+   * es gibt keine zweite Rechnung, die auseinanderlaufen koennte.
+   *
+   * **Uebung und Echthandel werden nicht vermischt.** Jede Gruppe
+   * traegt `uebung`, und die Oberflaeche weist sie getrennt aus. Die
+   * Summe aus beidem waere eine Zahl ohne Bedeutung.
+   *
+   * Sortiert nach Ergebnis, absteigend — die Frage ist fast immer
+   * "was laeuft am besten?".
+   */
+  gruppiert(trades: TradeInR[], nach: 'boerse' | 'quelle' | 'strategie'): Gruppenzahl[] {
+    const koerbe = new Map<string, TradeInR[]>();
+
+    for (const t of trades) {
+      const schluessel = nach === 'boerse' ? t.boerse
+        : nach === 'quelle' ? t.quelle
+          : t.strategie;
+      const korb = koerbe.get(schluessel);
+      if (korb) korb.push(t); else koerbe.set(schluessel, [t]);
+    }
+
+    const gruppen: Gruppenzahl[] = [];
+    for (const [name, eigene] of koerbe) {
+      gruppen.push({
+        name,
+        nach,
+        // Eine Gruppe gilt als Uebung, wenn ALLE ihre Trades uebten.
+        // Gemischt kommt vor, wenn eine Boerse zwischendurch
+        // umgestellt wurde — dann ist sie keine Uebungsgruppe mehr.
+        uebung: eigene.every(t => t.uebung),
+        boersen: [...new Set(eigene.map(t => t.boerse))].sort(),
+        kennzahlen: this.kennzahlen(eigene),
+      });
+    }
+
+    return gruppen.sort((a, b) => b.kennzahlen.ergebnis - a.kennzahlen.ergebnis);
+  }
+
+  /**
+   * Ergebnis je Kalendertag.
+   *
+   * Grundlage der Kalenderansicht. Ein Tag ist der Tag, an dem ein
+   * Trade **geschlossen** wurde — dann wurde sein Ergebnis
+   * realisiert. Der Einstieg kann Tage zurueckliegen.
+   *
+   * `roiPct` bezieht das Ergebnis auf das an diesem Tag eingegangene
+   * Risiko. Die beiden Zahlen beantworten verschiedene Fragen: Die
+   * Summe sagt, was herauskam; der Prozentwert, ob der Einsatz es
+   * wert war.
+   */
+  jeTag(trades: TradeInR[]): Tageszahl[] {
+    const tage = new Map<string, TradeInR[]>();
+
+    for (const t of trades) {
+      if (!t.beendet) continue;
+      const tag = String(t.beendet).slice(0, 10);   // YYYY-MM-DD
+      const liste = tage.get(tag);
+      if (liste) liste.push(t); else tage.set(tag, [t]);
+    }
+
+    const ergebnis: Tageszahl[] = [];
+    for (const [tag, eigene] of tage) {
+      const summe = eigene.reduce((s, t) => s + t.ergebnis, 0);
+      const risiko = eigene.reduce((s, t) => s + (t.risiko ?? 0), 0);
+      const mitR = eigene.filter(t => t.rVielfaches != null);
+
+      ergebnis.push({
+        tag,
+        trades: eigene.length,
+        gewinner: eigene.filter(t => t.ergebnis > 0).length,
+        ergebnis: runde2w(summe),
+        // Ohne bekanntes Risiko keine Prozentangabe — eine erfundene
+        // Bezugsgroesse waere schlechter als gar keine.
+        roiPct: risiko > 0 ? runde2w((summe / risiko) * 100) : null,
+        summeR: mitR.length > 0
+          ? runde2w(mitR.reduce((s, t) => s + (t.rVielfaches ?? 0), 0))
+          : null,
+        uebung: eigene.every(t => t.uebung),
+      });
+    }
+
+    return ergebnis.sort((a, b) => a.tag.localeCompare(b.tag));
   }
 
   /** Die Kennzahlen ueber eine Menge von Trades. */
@@ -427,6 +586,11 @@ export class KennzahlenService {
 // ============================================================
 // Kleinkram
 // ============================================================
+
+/** Auf Cent — fuer Betraege, die angezeigt werden. */
+function runde2w(wert: number): number {
+  return Math.round(wert * 100) / 100;
+}
 
 function mittel(werte: number[]): number | null {
   if (werte.length === 0) return null;

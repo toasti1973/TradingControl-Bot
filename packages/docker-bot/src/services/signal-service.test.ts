@@ -470,3 +470,114 @@ describe('SignalService — Trennung der Bestaende', () => {
     expect(new Set(alle.map(p => p.id)).size).toBe(3);
   });
 });
+
+// ============================================================
+// Das Geheimnis im Datensatz
+//
+// Der empfohlene Weg ist der Pfad: `/webhook/signal/<geheimnis>`.
+// Bei TradingView ist es aber verbreitet, es im Datensatz
+// mitzuschicken — die Webhook-Adresse steht offen in der
+// Alarm-Verwaltung und wandert beim Weitergeben eines Alarms mit.
+//
+// Gelesen wurde bisher allein das Feld `secret`. Wer sein Feld
+// `geheimnis` nannte — naheliegend bei einer durchweg deutschen
+// Oberflaeche —, bekam eine Abweisung ohne erkennbaren Grund: Das
+// Geheimnis stand da, nur unter einem Namen, nach dem niemand sah.
+//
+// Am 02.11.2026 waren so 18 TradingView-Alarme eingerichtet, von
+// denen keiner durchkam.
+// ============================================================
+
+describe('SignalService — Geheimnis im Datensatz', () => {
+  let verzeichnis: string;
+  let store: SqliteStore;
+  let dienst: SignalService;
+
+  beforeEach(() => {
+    verzeichnis = mkdtempSync(join(tmpdir(), 'sigsec-'));
+    store = new SqliteStore(join(verzeichnis, 'bot.db'));
+    dienst = new SignalService(
+      store, monitorAttrappe().dienst, kapitalDienst(10_000), stilleAusgabe,
+      { ...STANDARD_SIGNAL_CONFIG, webhookSecret: GEHEIMNIS, defaultExchange: 'paper' },
+    );
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(verzeichnis, { recursive: true, force: true });
+  });
+
+  async function schicke(aenderungen: Record<string, unknown>) {
+    const rumpf = signalRumpf(aenderungen);
+    return dienst.nimmAn({
+      roherRumpf: rumpf,
+      payload: JSON.parse(rumpf) as Record<string, unknown>,
+      herkunftsAdresse: '1.2.3.4',
+    });
+  }
+
+  it('nimmt das Feld `geheimnis` an — der Fall aus TradingView', async () => {
+    const ergebnis = await schicke({ geheimnis: GEHEIMNIS });
+    expect(ergebnis.status).not.toBe('rejected_auth');
+  });
+
+  it('nimmt weiterhin `secret` an', async () => {
+    const ergebnis = await schicke({ secret: GEHEIMNIS });
+    expect(ergebnis.status).not.toBe('rejected_auth');
+  });
+
+  it('kennt auch passphrase, token und key', async () => {
+    for (const feld of ['passphrase', 'token', 'key']) {
+      const ergebnis = await schicke({ [feld]: GEHEIMNIS });
+      expect(ergebnis.status, `Feld "${feld}"`).not.toBe('rejected_auth');
+    }
+  });
+
+  it('weist ein falsches Geheimnis ab', async () => {
+    expect((await schicke({ geheimnis: 'falsch' })).status).toBe('rejected_auth');
+  });
+
+  it('weist einen Datensatz ohne Geheimnis ab', async () => {
+    expect((await schicke({})).status).toBe('rejected_auth');
+  });
+
+  // Ohne diese Pruefung traefe ein leeres Feld gegen ein leeres
+  // konfiguriertes Geheimnis.
+  it('wertet ein leeres Feld nicht als Angabe', async () => {
+    expect((await schicke({ geheimnis: '' })).status).toBe('rejected_auth');
+  });
+
+  it('macht das Geheimnis vor dem Speichern unkenntlich', async () => {
+    await schicke({ geheimnis: GEHEIMNIS });
+
+    const roh = String(store.getSignals({ limit: 1 })[0]?.raw_payload ?? '');
+    expect(roh, 'Geheimnis im Klartext in der Datenbank').not.toContain(GEHEIMNIS);
+    expect(roh).toContain('***');
+    // Der Rest bleibt erhalten — er ist der Beleg.
+    expect(roh).toContain('BTCUSDT');
+  });
+
+  it('maskiert jedes der bekannten Felder', async () => {
+    for (const feld of ['secret', 'geheimnis', 'passphrase', 'token', 'key']) {
+      await schicke({ [feld]: GEHEIMNIS });
+    }
+    for (const eintrag of store.getSignals({ limit: 20 })) {
+      expect(String(eintrag.raw_payload ?? ''), 'unmaskiert').not.toContain(GEHEIMNIS);
+    }
+  });
+
+  it('kommt mit Leerzeichen und Zeilenumbruechen zurecht', async () => {
+    // So schickt TradingView es: eingerueckt, mit Umbruechen.
+    const rumpf = `{\n  "geheimnis" : "${GEHEIMNIS}",\n` +
+      signalRumpf().slice(1);
+
+    await dienst.nimmAn({
+      roherRumpf: rumpf,
+      payload: JSON.parse(rumpf) as Record<string, unknown>,
+      herkunftsAdresse: '1.2.3.4',
+    });
+
+    expect(String(store.getSignals({ limit: 1 })[0]?.raw_payload ?? ''))
+      .not.toContain(GEHEIMNIS);
+  });
+});

@@ -636,3 +636,545 @@ tr:hover td { background: var(--bg-tertiary); }
 @media (prefers-reduced-motion: reduce) {
   .tc-flack-gruen, .tc-flack-rot, .tc-flack-neutral { animation: none; }
 }
+
+/* ============================================================
+   Logos, Betriebsmodus, Leistungstabellen, Kalender
+   ============================================================ */
+
+/* --- Logos ------------------------------------------------- */
+
+/*
+  Ein Kreis mit Kurzzeichen. Börsen und Assets teilen sich die
+  Form — das hält die Zeilenhöhe gleich, auch wenn beide
+  nebeneinander stehen.
+*/
+.logo-kreis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  flex: 0 0 auto;
+  /* Helle Logofarben (Binance-Gelb) brauchen einen dunklen Text;
+     ein Schatten löst das ohne Farbrechnung je Logo. */
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.55);
+  vertical-align: middle;
+}
+
+.logo-zeile {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* --- Betriebsmodus in der Seitenleiste ---------------------- */
+
+.betriebsmodus {
+  margin: 0 12px 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg-tertiary);
+}
+
+/*
+  Echthandel ist rot und ausgeschrieben. Das ist Absicht: Seit der
+  globale Riegel entfallen ist, ist diese Zeile die einzige Stelle,
+  an der ein versehentlich freigeschalteter Echthandel auffällt.
+*/
+.modus-echt {
+  display: block;
+  color: var(--red);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.modus-uebung {
+  display: block;
+  color: var(--text-secondary);
+}
+
+.modus-unbekannt {
+  display: block;
+  color: var(--yellow);
+}
+
+.modus-liste {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* --- Statuszeile am unteren Rand ---------------------------- */
+
+.statusleiste {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  /* Auf Zahlen in dieser Zeile fällt der Blick oft — sie sollen
+     beim Aktualisieren nicht springen. */
+  font-variant-numeric: tabular-nums;
+}
+
+.status-punkt {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+.status-punkt.gruen { background: var(--green); }
+.status-punkt.rot   { background: var(--red); }
+.status-punkt.grau  { background: var(--text-muted); }
+
+.status-trenner {
+  color: var(--border);
+  margin: 0 2px;
+}
+
+/* Die Statuszeile verdeckt sonst den letzten Tabelleneintrag. */
+.main { padding-bottom: 36px; }
+
+/* --- Leistung nach Herkunft --------------------------------- */
+
+.karten-titel {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.lg-titel {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.lg-titel:first-child { margin-top: 0; }
+
+.lg-summe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lg-summe-titel {
+  font-weight: 600;
+  min-width: 120px;
+}
+
+/*
+  Übungszahlen gedämpft. Sie stehen neben echten, und man soll auf
+  einen Blick sehen, welche davon Kapital bewegt haben.
+*/
+.lg-summe-uebung { opacity: 0.72; }
+
+.lg-marke-uebung {
+  display: inline-block;
+  padding: 1px 5px;
+  margin-left: 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.tabelle-scroll { overflow-x: auto; }
+
+.tabelle-schlank {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabelle-schlank th {
+  text-align: left;
+  padding: 6px 10px;
+  font-weight: 600;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.tabelle-schlank td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.tabelle-schlank tr:last-child td { border-bottom: none; }
+.tabelle-schlank .num { text-align: right; }
+
+.wert-plus    { color: var(--green); }
+.wert-minus   { color: var(--red); }
+.wert-neutral { color: var(--text-muted); }
+
+/* --- Kalender ----------------------------------------------- */
+
+.kal-leiste {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.kal-kopf {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.kal-monat {
+  min-width: 130px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.kal-pfeil {
+  padding: 2px 9px;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.kal-summe {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kal-umschalter { margin-left: auto; display: flex; gap: 6px; }
+.kal-umschalter .btn { font-size: 12px; padding: 4px 10px; }
+
+.kal-wochentage,
+.kal-gitter {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.kal-wochentage {
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.kal-tag {
+  position: relative;
+  min-height: 62px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: outline-color 0.1s;
+  outline: 1px solid transparent;
+}
+
+.kal-tag:hover { outline-color: var(--accent); }
+
+.kal-tag-leer {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--bg-tertiary);
+  cursor: default;
+}
+.kal-tag-leer:hover { outline-color: transparent; }
+
+.kal-nr {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.kal-wert {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.kal-anzahl {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* Ein Punkt rechts oben kennzeichnet Übungstage. */
+.kal-uebung {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.kal-leer { min-height: 62px; }
+
+.kal-tagkopf {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: baseline;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Zahlen stehen untereinander bündig
+   ============================================================
+
+   Eine Zeile mit großer Wirkung bei Zahlenkolonnen: Ohne
+   Tabellenziffern haben 1 und 8 verschiedene Breiten, und Beträge
+   in einer Spalte fransen aus.
+*/
+.cards .card-value,
+table td,
+table th {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Kleine Bildschirme
+   ============================================================
+
+   Kein eigenes Mobil-Layout, sondern Umbrüche an den Stellen, wo
+   es sonst klemmt. Das macht die Anwendung auf dem Telefon
+   benutzbar, ohne eine zweite Oberfläche zu pflegen — und es ist
+   die Vorstufe zur installierbaren Web-App.
+*/
+
+@media (max-width: 900px) {
+  /* Die Seitenleiste wandert nach unten und wird zur Leiste. */
+  .app {
+    display: block;
+    padding-bottom: 92px;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 26px;
+    z-index: 45;
+    width: auto;
+    height: auto;
+    display: flex;
+    overflow-x: auto;
+    padding: 0;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    /* Damit die Einträge beim Wischen einrasten statt zu treiben. */
+    scroll-snap-type: x proximity;
+  }
+
+  .sidebar-logo,
+  .betriebsmodus { display: none; }
+
+  /* Der Betriebsmodus verschwindet nicht — er zieht in die
+     Statuszeile, die ohnehin immer sichtbar ist. */
+
+  .nav-item {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    scroll-snap-align: start;
+    white-space: nowrap;
+  }
+
+  .main { padding: 14px 12px 40px; }
+
+  .page-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Kachelreihen brechen auf zwei Spalten um statt zu schrumpfen. */
+  .cards {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  /* Breite Tabellen scrollen in sich, statt die Seite zu dehnen. */
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+
+  .kal-tag, .kal-leer { min-height: 48px; }
+  .kal-wert { font-size: 11px; }
+  .kal-anzahl { display: none; }
+
+  .statusleiste {
+    font-size: 10.5px;
+    padding: 4px 10px;
+    gap: 5px;
+  }
+}
+
+@media (max-width: 560px) {
+  /* Auf dem Telefon zählt nur das Nötigste je Kachel. */
+  .cards { grid-template-columns: repeat(2, 1fr); }
+
+  .kal-wochentage { font-size: 10px; }
+  .kal-umschalter { width: 100%; margin-left: 0; }
+
+  .lg-summe { gap: 10px; font-size: 12px; }
+  .lg-summe-titel { min-width: 100%; }
+}
+
+/* --- Gegliederte Navigation --------------------------------- */
+
+.nav-gruppe {
+  display: block;
+  padding: 14px 16px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.nav-unter { padding-left: 24px; }
+
+@media (max-width: 900px) {
+  /* In der liegenden Leiste haben Überschriften keinen Platz —
+     dort zählt jeder Pixel Breite. */
+  .nav-gruppe { display: none; }
+  .nav-unter { padding-left: 14px; }
+}
+
+/* --- Detailansicht eines Plans: zweispaltig ----------------- */
+
+/*
+  Chart links und groß, Kennzahlen rechts als ruhige Spalte.
+  Vorher war es eine Kachelwand mit kleinem Chart obendrüber — dabei
+  beantwortet der Chart die meisten Fragen schneller als jede Tabelle.
+*/
+.pd-raster {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 20px;
+  align-items: start;
+}
+
+.pd-haupt { min-width: 0; }
+
+.pd-chart {
+  height: 420px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.pd-seite {
+  position: sticky;
+  top: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  font-size: 13px;
+}
+
+.pd-kopf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pd-boerse { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+
+/*
+  In der Seitenleiste werden aus den Kacheln Zeilen. Die Klassen
+  bleiben dieselben — so muss `kennzahlenKacheln()` nicht angefasst
+  werden, und das Nachladen funktioniert unverändert.
+*/
+.pd-seite .cards {
+  display: block;
+  margin: 0;
+}
+
+.pd-seite .card {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  margin: 0;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.pd-seite .card:last-child { border-bottom: none; }
+
+.pd-seite .card-label {
+  font-size: 11px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.pd-seite .card-value {
+  font-size: 13px;
+  text-align: right;
+  margin: 0;
+}
+
+.pd-seite .card-sub {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.pd-seite h4 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 1100px) {
+  /* Untereinander, sobald es eng wird — die Seitenleiste zuerst,
+     weil dort steht, wie der Trade gerade dasteht. */
+  .pd-raster { grid-template-columns: 1fr; }
+  .pd-seite { position: static; order: -1; }
+  .pd-chart { height: 300px; }
+  .pd-seite .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 0 14px;
+  }
+}

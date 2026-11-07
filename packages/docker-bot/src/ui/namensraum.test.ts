@@ -31,7 +31,12 @@ const hier = dirname(fileURLToPath(import.meta.url));
 const jsPfad = join(hier, 'public', 'js');
 
 /** Die Dateien in der Reihenfolge, in der die Seite sie laedt. */
-const DATEIEN = ['app.js', 'signale.js', 'chart.js', 'auswertung.js'];
+// Jede Datei, die der Browser gleichzeitig laedt, gehoert hierher.
+// Fehlt eine, bemerkt der Test ihre Kollisionen nicht.
+const DATEIEN = [
+  'app.js', 'signale.js', 'chart.js', 'auswertung.js',
+  'handelsplaetze.js', 'logos.js', 'uebersicht.js',
+];
 
 /**
  * Funktionen, die eine Datei auf oberster Ebene erklaert.
@@ -115,5 +120,46 @@ describe('Oberflaeche — ein gemeinsamer Namensraum', () => {
     for (const datei of DATEIEN) {
       expect(() => new Function(inhalte.get(datei)!)).not.toThrow();
     }
+  });
+});
+
+// ============================================================
+// Jede API-Anfrage geht durch apiFetch
+//
+// `apiFetch()` setzt den Anmeldeheader und zeigt bei 401 das eigene
+// Login-Fenster. Rohes `fetch('/api/…')` tut beides nicht: Es läuft
+// ohne Header, der Server antwortet mit
+//
+//     WWW-Authenticate: Basic realm="TradingControl Bot"
+//
+// und daraufhin öffnet der BROWSER seinen eigenen Dialog — mit einem
+// Feld für den Benutzernamen, den es in dieser Anwendung gar nicht
+// gibt. Am 04.11.2026 geschah genau das, weil drei neue Dateien
+// rohes fetch verwendeten.
+//
+// Der Fehler ist unangenehm, weil er nicht beim Entwickeln auffällt:
+// Wer angemeldet ist, bemerkt nichts.
+// ============================================================
+
+describe('API-Anfragen gehen durch apiFetch', () => {
+  // app.js darf: Dort steht apiFetch selbst, und die Anmeldung kann
+  // keinen Header tragen, den sie erst beschafft.
+  const OHNE_APP = DATEIEN.filter(d => d !== 'app.js');
+
+  it('ruft nirgends rohes fetch auf /api/ auf', () => {
+    const sünder: string[] = [];
+
+    for (const datei of OHNE_APP) {
+      const text = readFileSync(join(jsPfad, datei), 'utf8');
+      // fetch('/api…) oder fetch("/api…) oder fetch(`/api…
+      const treffer = text.match(/\bfetch\s*\(\s*['"`]\/api/g);
+      if (treffer) sünder.push(`${datei} (${treffer.length}×)`);
+    }
+
+    expect(
+      sünder,
+      'Diese Dateien rufen rohes fetch auf /api/ — das löst den ' +
+      'Browser-Login-Dialog aus. apiFetch() verwenden.',
+    ).toEqual([]);
   });
 });

@@ -4,12 +4,24 @@ import { SettingsService } from '../../services/settings-service.js';
 import { BotService } from '../../services/bot-service.js';
 import { TelegramService } from '../../services/telegram-service.js';
 import { Logger } from '../../services/log-service.js';
+import type { BotConfig } from '../../config.js';
 
 export function createSettingsRouter(
   settingsService: SettingsService,
   botService: BotService,
   logger: Logger,
   telegramService: TelegramService,
+  /**
+   * Die Broker-Registry — sie muss von neuen Zugangsdaten erfahren.
+   *
+   * Sie haelt die Konfiguration, mit der der Server startete. Wer
+   * danach einen Boersen-Schluessel hinterlegt, aendert den
+   * KeyStore, nicht aber das, womit die Registry arbeitet. Die Folge
+   * war, dass `hatZugangsdaten()` weiterhin "nein" sagte und das
+   * Umstellen auf echten Handel mit "keine Zugangsdaten" abgelehnt
+   * wurde — obwohl sie dalagen.
+   */
+  brokers?: { reconfigure(config: BotConfig): Promise<void> },
 ): Router {
   const router = Router();
 
@@ -123,6 +135,22 @@ export function createSettingsRouter(
 
       // Neue effektive Config laden und Bot restarten
       const newConfig = await settingsService.getEffectiveConfig();
+
+      // Die Broker-Registry mitnehmen. Ohne das arbeitet sie weiter
+      // mit den Zugangsdaten vom Serverstart — ein eben erst
+      // hinterlegter Boersen-Schluessel bliebe ihr unbekannt, bis
+      // jemand den Dienst neu startet.
+      if (brokers) {
+        try {
+          await brokers.reconfigure(newConfig);
+          logger.info('Broker-Zugaenge nach Aenderung der Einstellungen neu aufgebaut');
+        } catch (err) {
+          // Kein Abbruch: Die Einstellungen sind gespeichert. Beim
+          // naechsten Neustart greifen sie ohnehin.
+          logger.warn({ err }, 'Broker-Registry liess sich nicht neu konfigurieren');
+        }
+      }
+
       try {
         await botService.restart(newConfig);
         res.json({ success: true, message: 'Einstellungen gespeichert. Bot neu gestartet.' });

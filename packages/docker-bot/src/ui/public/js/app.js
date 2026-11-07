@@ -159,6 +159,10 @@ function navigate(page) {
 }
 
 function loadPage(page) {
+  // Der Betriebsmodus haengt an keiner Seite — er gilt immer, und
+  // eine veraltete Anzeige waere hier gefaehrlicher als anderswo.
+  if (typeof zuLaden === 'function') zuLaden();
+
   switch (page) {
     case 'dashboard': updateDashboard(); break;
     case 'plans': updatePlans(); break;
@@ -167,8 +171,8 @@ function loadPage(page) {
     case 'copytrading': updateCopyTrading(); break;
     case 'tradeplans': updateTradePlans(); break;
     case 'signale': updateSignale(); break;
-    case 'auswertung': updateAuswertung(); break;
-    case 'settings': updateSettings(); risikoprofilLaden(); uebungskontoLaden(); break;
+    case 'auswertung': updateAuswertung(); lgLaden(); kalLaden(); break;
+    case 'settings': updateSettings(); risikoprofilLaden(); uebungskontoLaden(); hpLaden(); break;
     case 'logs': updateLogs(); break;
   }
 }
