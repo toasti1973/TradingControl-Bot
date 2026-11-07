@@ -23,6 +23,29 @@ interface EncryptedFile {
 
 export class KeyStore {
   private cachedKey: Buffer | null = null;
+
+  /**
+   * Der Salt, aus dem der aktuelle Schluessel abgeleitet wurde.
+   *
+   * **Muss gemerkt werden.** `deriveKey` erzeugt ohne Vorgabe einen
+   * zufaelligen Salt und gibt ihn zurueck; hier stand frueher nur
+   * `const { key } = ...`, der Salt fiel unter den Tisch. `setKeys`
+   * holte ihn sich dann aus der Datei — die es beim ersten Mal noch
+   * nicht gab — und schrieb `Buffer.alloc(0)`, also einen leeren.
+   *
+   * Beim naechsten Start wurde der Schluessel aus eben diesem leeren
+   * Salt abgeleitet und passte nicht mehr zum Inhalt:
+   *
+   *     KeyStore corrupted or wrong password:
+   *     Unsupported state or unable to authenticate data
+   *
+   * Die Folge war still und schwerwiegend: **Jedes hinterlegte
+   * Geheimnis ueberlebte nur bis zum naechsten Neustart** — der
+   * TC-API-Schluessel ebenso wie die Zugangsdaten jeder Boerse. Der
+   * Bot lief weiter, meldete bloss "TC_API_KEY nicht gesetzt" und
+   * fand nie eine Boerse mit Zugangsdaten.
+   */
+  private cachedSalt: Buffer | null = null;
   private readonly filePath: string;
 
   constructor(filePath: string) {
@@ -32,12 +55,14 @@ export class KeyStore {
   /** Initialisiert den KeyStore mit dem Web-UI-Passwort */
   async unlock(password: string): Promise<void> {
     const salt = await this.loadSalt();
-    const { key } = await CryptoUtils.deriveKey(password, salt ?? undefined);
-    this.cachedKey = key;
+    const abgeleitet = await CryptoUtils.deriveKey(password, salt ?? undefined);
+    this.cachedKey = abgeleitet.key;
+    this.cachedSalt = abgeleitet.salt;
   }
 
   lock(): void {
     this.cachedKey = null;
+    this.cachedSalt = null;
   }
 
   isUnlocked(): boolean {
@@ -67,14 +92,7 @@ export class KeyStore {
     const plaintext = JSON.stringify(merged);
     const encrypted = CryptoUtils.encrypt(plaintext, this.cachedKey!);
 
-    const salt = await this.loadSalt();
-    const file: EncryptedFile = {
-      version: 1,
-      salt: (salt ?? Buffer.alloc(0)).toString('hex'),
-      data: encrypted.toString('hex'),
-    };
-
-    await this.writeSecure(JSON.stringify(file, null, 2));
+    await this.schreibeDatei(encrypted);
   }
 
   async getKey(name: string): Promise<string | undefined> {
@@ -90,13 +108,37 @@ export class KeyStore {
     const keys = await this.getKeys();
     delete keys[name];
     const plaintext = JSON.stringify(keys);
-    const encrypted = CryptoUtils.encrypt(plaintext, this.cachedKey!);
+    await this.schreibeDatei(CryptoUtils.encrypt(plaintext, this.cachedKey!));
+  }
 
-    const salt = await this.loadSalt();
+  /**
+   * Schreibt die Datei — mit dem Salt, der zum Schluessel gehoert.
+   *
+   * An einer Stelle, weil es zwei Mal danebenging: `setKeys` und
+   * `deleteKey` holten den Salt aus der Datei statt aus dem Speicher.
+   * Existierte sie noch nicht, landete ein leerer Salt darin — und
+   * der Inhalt war nach dem naechsten Neustart nicht mehr lesbar.
+   *
+   * `cachedSalt` ist der Salt, aus dem `this.cachedKey` entstand. Nur
+   * er darf hier hinein; alles andere ergibt eine Datei, die sich
+   * selbst widerspricht.
+   */
+  private async schreibeDatei(verschluesselt: Buffer): Promise<void> {
+    const salt = this.cachedSalt ?? await this.loadSalt();
+    if (!salt || salt.length === 0) {
+      // Lieber abbrechen als eine Datei schreiben, die beim naechsten
+      // Start nicht mehr aufgeht. Der Aufrufer bekommt einen Fehler,
+      // und das Geheimnis bleibt ungespeichert — statt still verloren.
+      throw new Error(
+        'KeyStore: kein Salt vorhanden — es wird nichts geschrieben, ' +
+        'sonst waere der Inhalt nach einem Neustart unlesbar.',
+      );
+    }
+
     const file: EncryptedFile = {
       version: 1,
-      salt: (salt ?? Buffer.alloc(0)).toString('hex'),
-      data: encrypted.toString('hex'),
+      salt: salt.toString('hex'),
+      data: verschluesselt.toString('hex'),
     };
 
     await this.writeSecure(JSON.stringify(file, null, 2));
@@ -106,6 +148,7 @@ export class KeyStore {
   async initialize(password: string): Promise<void> {
     const { key, salt } = await CryptoUtils.deriveKey(password);
     this.cachedKey = key;
+    this.cachedSalt = salt;
 
     const plaintext = JSON.stringify({});
     const encrypted = CryptoUtils.encrypt(plaintext, key);
